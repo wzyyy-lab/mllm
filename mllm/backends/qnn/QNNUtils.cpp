@@ -489,10 +489,16 @@ void QNNTensorWrapper::alloc() {
   // or, register the existing storage to QNN(passing allocated input to QNN)
   if (!dataContainer_.impl()->ptr<void>()) { dataContainer_.alloc(); }
 
+  // Avoid re-registering the same pointer every execute (graph switching can call alloc() frequently).
+  // When the pointer changes (e.g. PD fusion binds a different KV buffer), we must register again.
+  void* ptr = dataContainer_.ptr<void>();
+  if (isAlloc_ && registeredPtr_ == ptr) { return; }
+
   std::static_pointer_cast<QNNAllocator>(Context::instance().getBackend(kQNN)->allocator())
-      ->registerQnnTensorToSharedBuffer(dataContainer_.ptr<void>(), qnnTensor_);
+      ->registerQnnTensorToSharedBuffer(ptr, qnnTensor_);
 
   isAlloc_ = true;
+  registeredPtr_ = ptr;
 }
 
 void QNNTensorWrapper::setScaleOffsetQuantization(const std::vector<Qnn_ScaleOffset_t>& scaleOffsets, int32_t axis) {

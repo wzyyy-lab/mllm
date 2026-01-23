@@ -14,6 +14,7 @@
 #include "mllm/compile/ir/linalg/Attribute.hpp"
 #include "mllm/backends/qnn/aot/passes/AOTCompileContext.hpp"
 #include "mllm/backends/qnn/aot/passes/LLMQuantRecipePass.hpp"
+#include "mllm/backends/base/PluginInterface.hpp"
 
 namespace mllm::qnn::aot {
 
@@ -820,6 +821,84 @@ bool LLMQuantRecipeWherePattern::rewrite(ir::IRWriter& writer, const ir::op_ptr_
 }
 
 //===----------------------------------------------------------------------===//
+// CustomizedOp Pattern
+//===----------------------------------------------------------------------===//
+bool LLMQuantRecipeCustomizedPattern::isMatch(const mllm::ir::op_ptr_t& op) {
+  if (op->isa_<ir::linalg::CustomizedOp>()) { return true; }
+  return false;
+}
+
+bool LLMQuantRecipeCustomizedPattern::rewrite(ir::IRWriter& writer, const ir::op_ptr_t& node) {
+  auto cust = node->cast_<ir::linalg::CustomizedOp>();
+  auto* base = cust->getAOp();
+  auto* plugin_op = dynamic_cast<mllm::plugin::interface::CustomizedOp*>(base);
+  if (!plugin_op) { return false; }
+
+  const auto type = plugin_op->getCustomOpTypeName();
+  // Handle a small whitelist of QNN-side customized ops used by PD fusion.
+  if (type != std::string("PDKVCacheUpdate") && type != std::string("FusedPDAttention")) { return false; }
+
+  // Ensure all inputs have specs.
+  for (auto& in_v : node->inputs()) {
+    if (!in_v->isa_<ir::tensor::TensorValue>()) continue;
+    auto t = in_v->cast_<ir::tensor::TensorValue>();
+    if (!t->getAttr("quant_recipe")) { t->setAttr("quant_recipe", genSimpleQuantizationSpecAttr(writer.getContext(), t)); }
+  }
+
+  // FusedPDAttention: output is defined by the first input (q) shape/dtype, but quantization can be treated as "simple" spec.
+  if (type == std::string("FusedPDAttention")) {
+    for (auto& out_v : node->outputs()) {
+      auto t = out_v->cast_<ir::tensor::TensorValue>();
+      if (!t->getAttr("quant_recipe")) { t->setAttr("quant_recipe", genSimpleQuantizationSpecAttr(writer.getContext(), t)); }
+    }
+
+    auto annotation_attr = writer.create<ir::linalg::LinalgIRQuantizatonAnnotationAttr>();
+    for (auto& in_v : node->inputs()) {
+      auto t = in_v->cast_<ir::tensor::TensorValue>();
+      annotation_attr->annotation_.inputs.emplace_back(
+          t->getAttr("quant_recipe")->cast_<ir::linalg::LinalgIRQuantizatonSpecAttr>()->spec_);
+    }
+    for (auto& out_v : node->outputs()) {
+      auto t = out_v->cast_<ir::tensor::TensorValue>();
+      annotation_attr->annotation_.outputs.emplace_back(
+          t->getAttr("quant_recipe")->cast_<ir::linalg::LinalgIRQuantizatonSpecAttr>()->spec_);
+    }
+    node->setAttr("quant_recipe", annotation_attr);
+    return true;
+  }
+
+  // Outputs: match cache inputs (in_k_cache, in_v_cache).
+  // Input order (from CustomLayers.hpp): dep, in_k_cache, in_v_cache, present_k, present_v, n_past, src_offset, n_update, enable
+  auto it = node->inputs().begin();
+  if (std::distance(node->inputs().begin(), node->inputs().end()) < 3) { return false; }
+  auto in_k_cache = (*std::next(it, 1))->cast_<ir::tensor::TensorValue>();
+  auto in_v_cache = (*std::next(it, 2))->cast_<ir::tensor::TensorValue>();
+  MLLM_RETURN_FALSE_IF_NOT(in_k_cache && in_v_cache);
+  MLLM_RETURN_FALSE_IF_NOT(in_k_cache->getAttr("quant_recipe") && in_v_cache->getAttr("quant_recipe"));
+
+  auto out0 = node->outputs().front()->cast_<ir::tensor::TensorValue>();
+  auto out1 = (*std::next(node->outputs().begin()))->cast_<ir::tensor::TensorValue>();
+  MLLM_RETURN_FALSE_IF_NOT(out0 && out1);
+
+  out0->setAttr("quant_recipe", in_k_cache->getAttr("quant_recipe"));
+  out1->setAttr("quant_recipe", in_v_cache->getAttr("quant_recipe"));
+
+  auto annotation_attr = writer.create<ir::linalg::LinalgIRQuantizatonAnnotationAttr>();
+  for (auto& in_v : node->inputs()) {
+    auto t = in_v->cast_<ir::tensor::TensorValue>();
+    annotation_attr->annotation_.inputs.emplace_back(
+        t->getAttr("quant_recipe")->cast_<ir::linalg::LinalgIRQuantizatonSpecAttr>()->spec_);
+  }
+  annotation_attr->annotation_.outputs.emplace_back(
+      out0->getAttr("quant_recipe")->cast_<ir::linalg::LinalgIRQuantizatonSpecAttr>()->spec_);
+  annotation_attr->annotation_.outputs.emplace_back(
+      out1->getAttr("quant_recipe")->cast_<ir::linalg::LinalgIRQuantizatonSpecAttr>()->spec_);
+  node->setAttr("quant_recipe", annotation_attr);
+
+  return true;
+}
+
+//===----------------------------------------------------------------------===//
 // Softmax Pattern
 //===----------------------------------------------------------------------===//
 bool LLMQuantRecipeSoftmaxPattern::isMatch(const mllm::ir::op_ptr_t& op) {
@@ -1109,6 +1188,7 @@ LLMQuantRecipePass::LLMQuantRecipePass() {
   addPattern(LLMQuantRecipeMatMulPattern::create(), "matmul", 0);
   addPattern(LLMQuantRecipeEqualPattern::create(), "equal", 0);
   addPattern(LLMQuantRecipeWherePattern::create(), "where", 0);
+  addPattern(LLMQuantRecipeCustomizedPattern::create(), "customized", 0);
   addPattern(LLMQuantRecipeSoftmaxPattern::create(), "softmax", 0);
   addPattern(LLMQuantRecipeLinearPattern::create(), "linear", 0);
   addPattern(LLMQuantRecipeEmbeddingPattern::create(), "embedding", 0);

@@ -6,6 +6,7 @@
 #include "mllm/backends/qnn/aot/passes/MarkTensorIO.hpp"
 #include "mllm/backends/qnn/aot/passes/MergeLLMHeadIntoMainGraphPass.hpp"
 #include "mllm/backends/qnn/aot/passes/OpNamingPass.hpp"
+#include "mllm/backends/qnn/aot/passes/PDFusionPass.hpp"
 #include "mllm/backends/qnn/aot/passes/PTQPass.hpp"
 #include "mllm/backends/qnn/aot/passes/SplitLLMGraphPass.hpp"
 #include "mllm/core/ParameterFile.hpp"
@@ -28,6 +29,10 @@ std::vector<std::shared_ptr<ir::Pass>> createQnnAOTLoweringPipeline(QnnAOTEnv* e
     ret.emplace_back(createLLMQuantRecipePass());
     ret.emplace_back(createPTQPass());
     ret.emplace_back(createSplitLLMGraphPass());
+    if (config.contains("pd_fusion") && config["pd_fusion"].is_object() && config["pd_fusion"].value("enable", false)) {
+      // PD fusion rewriting needs the split subgraph name (e.g. model.0.s128), so run after SplitLLMGraphPass.
+      ret.emplace_back(createPDFusionPass());
+    }
     ret.emplace_back(createMarkTensorIOPass());
     ret.emplace_back(createLLM2QnnLoweringPass());
   } else {

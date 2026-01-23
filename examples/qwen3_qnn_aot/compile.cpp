@@ -17,6 +17,9 @@ MLLM_MAIN({
   auto& model_path = Argparse::add<std::string>("-m|--model_path").help("Model file path.");
   auto& model_cfg_path = Argparse::add<std::string>("-c|--config").help("Model config file path.");
   auto& qnn_aot_cfg_files = Argparse::add<std::string>("-aot_cfg|--aot_config").help("AOT Config file path.");
+  auto& qnn_lib_dir =
+      Argparse::add<std::string>("--qnn_lib_dir").help("Directory containing libQnnHtp.so (optional).").def("");
+  auto& out_context = Argparse::add<std::string>("--out_context").help("Output QNN context path").def("qwen3_context.bin");
 
   Argparse::parse(argc, argv);
 
@@ -75,12 +78,14 @@ MLLM_MAIN({
   auto ir = model.trace(trace_inputs, {});
 
   // Create Qnn AOT Model
-  auto qnn_aot_env = mllm::qnn::aot::QnnAOTEnv("/opt/qcom/aistack/qairt/2.41.0.251128/lib/x86_64-linux-clang/",
-                                               mllm::qnn::aot::parseQcomTargetMachineFromJSONFile(qnn_aot_cfg_files.get()));
+  const auto tm = mllm::qnn::aot::parseQcomTargetMachineFromJSONFile(qnn_aot_cfg_files.get());
+  auto qnn_aot_env =
+      qnn_lib_dir.get().empty() ? mllm::qnn::aot::QnnAOTEnv(tm) : mllm::qnn::aot::QnnAOTEnv(qnn_lib_dir.get(), tm);
 
   mllm::ir::PassManager pm(ir["model"]);
   pm.reg(mllm::qnn::aot::createQnnAOTLoweringPipeline(&qnn_aot_env, qnn_aot_cfg_files.get(), params));
   pm.run();
 
+  qnn_aot_env.saveContext("context.0", out_context.get());
   mllm::redirect("qwen3_qnn_aot.mir", [&]() { mllm::print(ir["model"]); });
 });

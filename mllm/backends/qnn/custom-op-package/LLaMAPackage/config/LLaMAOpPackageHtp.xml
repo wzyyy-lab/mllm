@@ -1019,6 +1019,401 @@ Confidential and Proprietary - Qualcomm Technologies, Inc.
         </OpDef>
 
         <OpDef>
+            <Name>PDKVCacheUpdate</Name>
+            <Description>
+                <Content>
+                    PD-fusion KV cache update (in-place write into pre-allocated caches)
+                </Content>
+            </Description>
+
+            <Input>
+                <Name>dep</Name>
+                <Description>
+                    <Content>dependency tensor (unused, used to enforce scheduling)</Content>
+                </Description>
+                <Mandatory>true</Mandatory>
+                <Datatype>BACKEND_SPECIFIC</Datatype>
+                <Shape>
+                    <Rank>4D</Rank>
+                    <Layout>NHWC</Layout>
+                    <Text>[N, C, H , W]</Text>
+                </Shape>
+            </Input>
+
+            <Input>
+                <Name>in_k_cache</Name>
+                <Description>
+                    <Content>KV-cache key input (for shape)</Content>
+                </Description>
+                <Mandatory>true</Mandatory>
+                <Datatype>BACKEND_SPECIFIC</Datatype>
+                <Shape>
+                    <Rank>4D</Rank>
+                    <Layout>NHWC</Layout>
+                    <Text>[N, C, H , W]</Text>
+                </Shape>
+            </Input>
+
+            <Input>
+                <Name>in_v_cache</Name>
+                <Description>
+                    <Content>KV-cache value input (for shape)</Content>
+                </Description>
+                <Mandatory>true</Mandatory>
+                <Datatype>BACKEND_SPECIFIC</Datatype>
+                <Shape>
+                    <Rank>4D</Rank>
+                    <Layout>NHWC</Layout>
+                    <Text>[N, C, H , W]</Text>
+                </Shape>
+            </Input>
+
+            <Input>
+                <Name>present_k</Name>
+                <Description>
+                    <Content>new key states</Content>
+                </Description>
+                <Mandatory>true</Mandatory>
+                <Datatype>BACKEND_SPECIFIC</Datatype>
+                <Shape>
+                    <Rank>4D</Rank>
+                    <Layout>NHWC</Layout>
+                    <Text>[N, C, H , W]</Text>
+                </Shape>
+            </Input>
+
+            <Input>
+                <Name>present_v</Name>
+                <Description>
+                    <Content>new value states</Content>
+                </Description>
+                <Mandatory>true</Mandatory>
+                <Datatype>BACKEND_SPECIFIC</Datatype>
+                <Shape>
+                    <Rank>4D</Rank>
+                    <Layout>NHWC</Layout>
+                    <Text>[N, C, H , W]</Text>
+                </Shape>
+            </Input>
+
+            <Input>
+                <Name>n_past</Name>
+                <Description>
+                    <Content>write position (past tokens)</Content>
+                </Description>
+                <Mandatory>true</Mandatory>
+                <Datatype>BACKEND_SPECIFIC</Datatype>
+                <Shape>
+                    <Rank>SCALAR</Rank>
+                </Shape>
+            </Input>
+
+            <Input>
+                <Name>src_offset</Name>
+                <Description>
+                    <Content>source offset in present KV</Content>
+                </Description>
+                <Mandatory>true</Mandatory>
+                <Datatype>BACKEND_SPECIFIC</Datatype>
+                <Shape>
+                    <Rank>SCALAR</Rank>
+                </Shape>
+            </Input>
+
+            <Input>
+                <Name>n_update</Name>
+                <Description>
+                    <Content>number of tokens to copy</Content>
+                </Description>
+                <Mandatory>true</Mandatory>
+                <Datatype>BACKEND_SPECIFIC</Datatype>
+                <Shape>
+                    <Rank>SCALAR</Rank>
+                </Shape>
+            </Input>
+
+            <Input>
+                <Name>enable</Name>
+                <Description>
+                    <Content>enable flag (0/1)</Content>
+                </Description>
+                <Mandatory>true</Mandatory>
+                <Datatype>BACKEND_SPECIFIC</Datatype>
+                <Shape>
+                    <Rank>SCALAR</Rank>
+                </Shape>
+            </Input>
+
+            <Output>
+                <Name>out_k_cache</Name>
+                <Description>
+                    <Content>updated key cache</Content>
+                </Description>
+                <Mandatory>true</Mandatory>
+                <Datatype>BACKEND_SPECIFIC</Datatype>
+                <Shape>
+                    <Rank>4D</Rank>
+                    <Text> [N, C, H , W] </Text>
+                </Shape>
+            </Output>
+
+            <Output>
+                <Name>out_v_cache</Name>
+                <Description>
+                    <Content>updated value cache</Content>
+                </Description>
+                <Mandatory>true</Mandatory>
+                <Datatype>BACKEND_SPECIFIC</Datatype>
+                <Shape>
+                    <Rank>4D</Rank>
+                    <Text> [N, C, H , W] </Text>
+                </Shape>
+            </Output>
+
+            <!--This Op is implemented on these Backends-->
+            <SupportedBackend>HTP</SupportedBackend>
+        </OpDef>
+
+        <OpDef>
+            <Name>FusedPDAttention</Name>
+            <Description>
+                <Content>
+                    PD-fusion attention (prefill+decode in one op). v0 is a correctness-first reference kernel.
+                </Content>
+            </Description>
+
+            <Input>
+                <Name>q</Name>
+                <Description>
+                    <Content>query states</Content>
+                </Description>
+                <Mandatory>true</Mandatory>
+                <Datatype>BACKEND_SPECIFIC</Datatype>
+                <Shape>
+                    <Rank>4D</Rank>
+                    <Layout>NHWC</Layout>
+                    <Text>[N, C, H , W]</Text>
+                </Shape>
+            </Input>
+
+            <Input>
+                <Name>k_curr</Name>
+                <Description>
+                    <Content>current key states</Content>
+                </Description>
+                <Mandatory>true</Mandatory>
+                <Datatype>BACKEND_SPECIFIC</Datatype>
+                <Shape>
+                    <Rank>4D</Rank>
+                    <Layout>NHWC</Layout>
+                    <Text>[N, C, H , W]</Text>
+                </Shape>
+            </Input>
+
+            <Input>
+                <Name>v_curr</Name>
+                <Description>
+                    <Content>current value states</Content>
+                </Description>
+                <Mandatory>true</Mandatory>
+                <Datatype>BACKEND_SPECIFIC</Datatype>
+                <Shape>
+                    <Rank>4D</Rank>
+                    <Layout>NHWC</Layout>
+                    <Text>[N, C, H , W]</Text>
+                </Shape>
+            </Input>
+
+            <Input>
+                <Name>past_k_prefill</Name>
+                <Description>
+                    <Content>prefill-slot past key cache</Content>
+                </Description>
+                <Mandatory>true</Mandatory>
+                <Datatype>BACKEND_SPECIFIC</Datatype>
+                <Shape>
+                    <Rank>4D</Rank>
+                    <Layout>NHWC</Layout>
+                    <Text>[N, C, H , W]</Text>
+                </Shape>
+            </Input>
+
+            <Input>
+                <Name>past_v_prefill</Name>
+                <Description>
+                    <Content>prefill-slot past value cache</Content>
+                </Description>
+                <Mandatory>true</Mandatory>
+                <Datatype>BACKEND_SPECIFIC</Datatype>
+                <Shape>
+                    <Rank>4D</Rank>
+                    <Layout>NHWC</Layout>
+                    <Text>[N, C, H , W]</Text>
+                </Shape>
+            </Input>
+
+            <Input>
+                <Name>past_k_decode</Name>
+                <Description>
+                    <Content>decode-slot past key cache</Content>
+                </Description>
+                <Mandatory>true</Mandatory>
+                <Datatype>BACKEND_SPECIFIC</Datatype>
+                <Shape>
+                    <Rank>4D</Rank>
+                    <Layout>NHWC</Layout>
+                    <Text>[N, C, H , W]</Text>
+                </Shape>
+            </Input>
+
+            <Input>
+                <Name>past_v_decode</Name>
+                <Description>
+                    <Content>decode-slot past value cache</Content>
+                </Description>
+                <Mandatory>true</Mandatory>
+                <Datatype>BACKEND_SPECIFIC</Datatype>
+                <Shape>
+                    <Rank>4D</Rank>
+                    <Layout>NHWC</Layout>
+                    <Text>[N, C, H , W]</Text>
+                </Shape>
+            </Input>
+
+            <Input>
+                <Name>attention_mask</Name>
+                <Description>
+                    <Content>attention mask (same convention as KVCacheManager)</Content>
+                </Description>
+                <Mandatory>true</Mandatory>
+                <Datatype>BACKEND_SPECIFIC</Datatype>
+                <Shape>
+                    <Rank>4D</Rank>
+                    <Layout>NHWC</Layout>
+                    <Text>[N, C, H , W]</Text>
+                </Shape>
+            </Input>
+
+            <Input>
+                <Name>fusion_ctrl</Name>
+                <Description>
+                    <Content>fusion control tensor [6]</Content>
+                </Description>
+                <Mandatory>true</Mandatory>
+                <Datatype>BACKEND_SPECIFIC</Datatype>
+                <Shape>
+                    <Rank>1D</Rank>
+                    <Text>[6]</Text>
+                </Shape>
+            </Input>
+
+            <Input>
+                <Name>q_scale</Name>
+                <Description>
+                    <Content>Q dequant scale (float32 scalar)</Content>
+                </Description>
+                <Mandatory>true</Mandatory>
+                <Datatype>BACKEND_SPECIFIC</Datatype>
+                <Shape>
+                    <Rank>SCALAR</Rank>
+                </Shape>
+            </Input>
+            <Input>
+                <Name>q_zp</Name>
+                <Description>
+                    <Content>Q zero-point (int32 scalar)</Content>
+                </Description>
+                <Mandatory>true</Mandatory>
+                <Datatype>BACKEND_SPECIFIC</Datatype>
+                <Shape>
+                    <Rank>SCALAR</Rank>
+                </Shape>
+            </Input>
+            <Input>
+                <Name>k_scale</Name>
+                <Description>
+                    <Content>K dequant scale (float32 scalar)</Content>
+                </Description>
+                <Mandatory>true</Mandatory>
+                <Datatype>BACKEND_SPECIFIC</Datatype>
+                <Shape>
+                    <Rank>SCALAR</Rank>
+                </Shape>
+            </Input>
+            <Input>
+                <Name>k_zp</Name>
+                <Description>
+                    <Content>K zero-point (int32 scalar, typically 128 for uint8 sym)</Content>
+                </Description>
+                <Mandatory>true</Mandatory>
+                <Datatype>BACKEND_SPECIFIC</Datatype>
+                <Shape>
+                    <Rank>SCALAR</Rank>
+                </Shape>
+            </Input>
+            <Input>
+                <Name>v_scale</Name>
+                <Description>
+                    <Content>V dequant scale (float32 scalar)</Content>
+                </Description>
+                <Mandatory>true</Mandatory>
+                <Datatype>BACKEND_SPECIFIC</Datatype>
+                <Shape>
+                    <Rank>SCALAR</Rank>
+                </Shape>
+            </Input>
+            <Input>
+                <Name>v_zp</Name>
+                <Description>
+                    <Content>V zero-point (int32 scalar, typically 128 for uint8 sym)</Content>
+                </Description>
+                <Mandatory>true</Mandatory>
+                <Datatype>BACKEND_SPECIFIC</Datatype>
+                <Shape>
+                    <Rank>SCALAR</Rank>
+                </Shape>
+            </Input>
+            <Input>
+                <Name>out_scale</Name>
+                <Description>
+                    <Content>Output quant scale (float32 scalar)</Content>
+                </Description>
+                <Mandatory>true</Mandatory>
+                <Datatype>BACKEND_SPECIFIC</Datatype>
+                <Shape>
+                    <Rank>SCALAR</Rank>
+                </Shape>
+            </Input>
+            <Input>
+                <Name>out_zp</Name>
+                <Description>
+                    <Content>Output zero-point (int32 scalar)</Content>
+                </Description>
+                <Mandatory>true</Mandatory>
+                <Datatype>BACKEND_SPECIFIC</Datatype>
+                <Shape>
+                    <Rank>SCALAR</Rank>
+                </Shape>
+            </Input>
+
+            <Output>
+                <Name>out_attn</Name>
+                <Description>
+                    <Content>attention output</Content>
+                </Description>
+                <Mandatory>true</Mandatory>
+                <Datatype>BACKEND_SPECIFIC</Datatype>
+                <Shape>
+                    <Rank>4D</Rank>
+                    <Text> [N, C, H , W] </Text>
+                </Shape>
+            </Output>
+
+            <!--This Op is implemented on these Backends-->
+            <SupportedBackend>HTP</SupportedBackend>
+        </OpDef>
+
+        <OpDef>
             <Name>WNop</Name>
             <Description>
                 <Content>
@@ -1101,6 +1496,8 @@ Confidential and Proprietary - Qualcomm Technologies, Inc.
             <OpName>RMSNorm</OpName>
             <OpName>RoPE</OpName>
             <OpName>IRoPE</OpName>
+            <OpName>PDKVCacheUpdate</OpName>
+            <OpName>FusedPDAttention</OpName>
             <OpName>LLaMAQuantize</OpName>
             <OpName>LLaMAMul</OpName>
             <OpName>LLaMAAdd</OpName>
@@ -1221,6 +1618,87 @@ Confidential and Proprietary - Qualcomm Technologies, Inc.
                 <Name>out[0]</Name>
                 <Datatype>QNN_DATATYPE_UFIXED_POINT_8</Datatype>
                 <Datatype>QNN_DATATYPE_SFIXED_POINT_16</Datatype>
+            </Output>
+        </SupplementalOpDef>
+
+        <!--FusedPDAttention-->
+        <SupplementalOpDef>
+            <Name>FusedPDAttention</Name>
+
+            <Input>
+                <Name>q</Name>
+                <Datatype>QNN_DATATYPE_FLOAT_16</Datatype>
+                <Datatype>QNN_DATATYPE_UFIXED_POINT_16</Datatype>
+            </Input>
+            <Input>
+                <Name>k_curr</Name>
+                <Datatype>QNN_DATATYPE_UFIXED_POINT_8</Datatype>
+            </Input>
+            <Input>
+                <Name>v_curr</Name>
+                <Datatype>QNN_DATATYPE_UFIXED_POINT_8</Datatype>
+            </Input>
+            <Input>
+                <Name>past_k_prefill</Name>
+                <Datatype>QNN_DATATYPE_UFIXED_POINT_8</Datatype>
+            </Input>
+            <Input>
+                <Name>past_v_prefill</Name>
+                <Datatype>QNN_DATATYPE_UFIXED_POINT_8</Datatype>
+            </Input>
+            <Input>
+                <Name>past_k_decode</Name>
+                <Datatype>QNN_DATATYPE_UFIXED_POINT_8</Datatype>
+            </Input>
+            <Input>
+                <Name>past_v_decode</Name>
+                <Datatype>QNN_DATATYPE_UFIXED_POINT_8</Datatype>
+            </Input>
+            <Input>
+                <Name>attention_mask</Name>
+                <Datatype>QNN_DATATYPE_UFIXED_POINT_16</Datatype>
+            </Input>
+            <Input>
+                <Name>fusion_ctrl</Name>
+                <Datatype>QNN_DATATYPE_INT_32</Datatype>
+            </Input>
+            <Input>
+                <Name>q_scale</Name>
+                <Datatype>QNN_DATATYPE_FLOAT_32</Datatype>
+            </Input>
+            <Input>
+                <Name>q_zp</Name>
+                <Datatype>QNN_DATATYPE_INT_32</Datatype>
+            </Input>
+            <Input>
+                <Name>k_scale</Name>
+                <Datatype>QNN_DATATYPE_FLOAT_32</Datatype>
+            </Input>
+            <Input>
+                <Name>k_zp</Name>
+                <Datatype>QNN_DATATYPE_INT_32</Datatype>
+            </Input>
+            <Input>
+                <Name>v_scale</Name>
+                <Datatype>QNN_DATATYPE_FLOAT_32</Datatype>
+            </Input>
+            <Input>
+                <Name>v_zp</Name>
+                <Datatype>QNN_DATATYPE_INT_32</Datatype>
+            </Input>
+            <Input>
+                <Name>out_scale</Name>
+                <Datatype>QNN_DATATYPE_FLOAT_32</Datatype>
+            </Input>
+            <Input>
+                <Name>out_zp</Name>
+                <Datatype>QNN_DATATYPE_INT_32</Datatype>
+            </Input>
+
+            <Output>
+                <Name>out_attn</Name>
+                <Datatype>QNN_DATATYPE_FLOAT_16</Datatype>
+                <Datatype>QNN_DATATYPE_UFIXED_POINT_16</Datatype>
             </Output>
         </SupplementalOpDef>
 
@@ -1477,6 +1955,91 @@ Confidential and Proprietary - Qualcomm Technologies, Inc.
             <Output>
                 <Name>out[0]</Name>
                 <Datatype>QNN_DATATYPE_UFIXED_POINT_8</Datatype>
+                <Datatype>QNN_DATATYPE_FLOAT_16</Datatype>
+                <Datatype>QNN_DATATYPE_FLOAT_32</Datatype>
+            </Output>
+        </SupplementalOpDef>
+
+        <!--PDKVCacheUpdate-->
+        <SupplementalOpDef>
+            <Name>PDKVCacheUpdate</Name>
+
+            <Input>
+                <Name>dep</Name>
+                <Datatype>QNN_DATATYPE_UFIXED_POINT_8</Datatype>
+                <Datatype>QNN_DATATYPE_SFIXED_POINT_8</Datatype>
+                <Datatype>QNN_DATATYPE_FLOAT_16</Datatype>
+                <Datatype>QNN_DATATYPE_FLOAT_32</Datatype>
+            </Input>
+
+            <Input>
+                <Name>in_k_cache</Name>
+                <Datatype>QNN_DATATYPE_UFIXED_POINT_8</Datatype>
+                <Datatype>QNN_DATATYPE_SFIXED_POINT_8</Datatype>
+                <Datatype>QNN_DATATYPE_FLOAT_16</Datatype>
+                <Datatype>QNN_DATATYPE_FLOAT_32</Datatype>
+            </Input>
+
+            <Input>
+                <Name>in_v_cache</Name>
+                <Datatype>QNN_DATATYPE_UFIXED_POINT_8</Datatype>
+                <Datatype>QNN_DATATYPE_SFIXED_POINT_8</Datatype>
+                <Datatype>QNN_DATATYPE_FLOAT_16</Datatype>
+                <Datatype>QNN_DATATYPE_FLOAT_32</Datatype>
+            </Input>
+
+            <Input>
+                <Name>present_k</Name>
+                <Datatype>QNN_DATATYPE_UFIXED_POINT_8</Datatype>
+                <Datatype>QNN_DATATYPE_SFIXED_POINT_8</Datatype>
+                <Datatype>QNN_DATATYPE_FLOAT_16</Datatype>
+                <Datatype>QNN_DATATYPE_FLOAT_32</Datatype>
+            </Input>
+
+            <Input>
+                <Name>present_v</Name>
+                <Datatype>QNN_DATATYPE_UFIXED_POINT_8</Datatype>
+                <Datatype>QNN_DATATYPE_SFIXED_POINT_8</Datatype>
+                <Datatype>QNN_DATATYPE_FLOAT_16</Datatype>
+                <Datatype>QNN_DATATYPE_FLOAT_32</Datatype>
+            </Input>
+
+            <Input>
+                <Name>n_past</Name>
+                <Datatype>QNN_DATATYPE_INT_32</Datatype>
+                <Datatype>QNN_DATATYPE_UINT_32</Datatype>
+            </Input>
+
+            <Input>
+                <Name>src_offset</Name>
+                <Datatype>QNN_DATATYPE_INT_32</Datatype>
+                <Datatype>QNN_DATATYPE_UINT_32</Datatype>
+            </Input>
+
+            <Input>
+                <Name>n_update</Name>
+                <Datatype>QNN_DATATYPE_INT_32</Datatype>
+                <Datatype>QNN_DATATYPE_UINT_32</Datatype>
+            </Input>
+
+            <Input>
+                <Name>enable</Name>
+                <Datatype>QNN_DATATYPE_INT_32</Datatype>
+                <Datatype>QNN_DATATYPE_UINT_32</Datatype>
+            </Input>
+
+            <Output>
+                <Name>out_k_cache</Name>
+                <Datatype>QNN_DATATYPE_UFIXED_POINT_8</Datatype>
+                <Datatype>QNN_DATATYPE_SFIXED_POINT_8</Datatype>
+                <Datatype>QNN_DATATYPE_FLOAT_16</Datatype>
+                <Datatype>QNN_DATATYPE_FLOAT_32</Datatype>
+            </Output>
+
+            <Output>
+                <Name>out_v_cache</Name>
+                <Datatype>QNN_DATATYPE_UFIXED_POINT_8</Datatype>
+                <Datatype>QNN_DATATYPE_SFIXED_POINT_8</Datatype>
                 <Datatype>QNN_DATATYPE_FLOAT_16</Datatype>
                 <Datatype>QNN_DATATYPE_FLOAT_32</Datatype>
             </Output>

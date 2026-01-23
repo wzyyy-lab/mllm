@@ -3,6 +3,7 @@
 #include <cassert>
 #include <cstddef>
 #include <cstring>
+#include <cstdlib>
 #include <fstream>
 #include <memory>
 #include "QNNUtils.hpp"
@@ -269,9 +270,17 @@ QNNRuntime* QNNRuntime::initRuntime(ProfilingLevel profilingLevel, QnnLog_Level_
       std::string target;
     };
 
+    const char* op_pkg_dir = std::getenv("MLLM_QNN_OP_PACKAGE_DIR");
+    auto resolvePath = [&](const char* fname) -> std::string {
+      if (!op_pkg_dir || std::string(op_pkg_dir).empty()) { return std::string(fname); }
+      std::string dir(op_pkg_dir);
+      if (!dir.empty() && dir.back() != '/' && dir.back() != '\\') { dir.push_back('/'); }
+      return dir + fname;
+    };
+
     std::vector<OpPackageInfo> opPackages = {
-        {.path = "libQnnLLaMAPackage_CPU.so", .interfaceProvider = "LLaMAPackageInterfaceProvider", .target = "CPU"},
-        {.path = "libQnnLLaMAPackage_HTP.so", .interfaceProvider = "LLaMAPackageInterfaceProvider", .target = "HTP"}};
+        {.path = resolvePath("libQnnLLaMAPackage_CPU.so"), .interfaceProvider = "LLaMAPackageInterfaceProvider", .target = "CPU"},
+        {.path = resolvePath("libQnnLLaMAPackage_HTP.so"), .interfaceProvider = "LLaMAPackageInterfaceProvider", .target = "HTP"}};
 
     for (const auto& pkg : opPackages) {
       if (!qnnInterface.backendRegisterOpPackage) {
@@ -541,10 +550,18 @@ bool QNNBackend::graphFinalize(const std::string& graphName) {
 }
 
 void QNNBackend::graphExecute(const std::string& graphName, std::vector<Tensor>& inputs, std::vector<Tensor>& outputs) {
+  Qnn_ErrorHandle_t err = QNN_SUCCESS;
+  (void)graphExecuteChecked(graphName, inputs, outputs, &err);
+  CALL_QNN(err);
+}
+
+bool QNNBackend::graphExecuteChecked(const std::string& graphName, std::vector<Tensor>& inputs, std::vector<Tensor>& outputs,
+                                     Qnn_ErrorHandle_t* outErr) {
+  if (outErr) { *outErr = QNN_SUCCESS; }
   auto it = qnnModelIndexMap_.find(graphName);
   if (it == qnnModelIndexMap_.end()) {
     MLLM_ERROR("Graph {} not found for execution", graphName);
-    return;
+    return false;
   }
   auto model = qnnModels_[it->second];
 
@@ -552,7 +569,13 @@ void QNNBackend::graphExecute(const std::string& graphName, std::vector<Tensor>&
   if (inputs.size() != model->getGraphInputTensorWrappers().size()) {
     MLLM_ERROR("Input size mismatch: expected {}, got {} for graph '{}'", model->getGraphInputTensorWrappers().size(),
                inputs.size(), graphName);
-    return;
+    return false;
+  }
+  // Validate output size matches expected output count
+  if (outputs.size() != model->getGraphOutputTensorWrappers().size()) {
+    MLLM_ERROR("Output size mismatch: expected {}, got {} for graph '{}'", model->getGraphOutputTensorWrappers().size(),
+               outputs.size(), graphName);
+    return false;
   }
 
   std::vector<Qnn_Tensor_t> qnn_inputs;
@@ -566,7 +589,7 @@ void QNNBackend::graphExecute(const std::string& graphName, std::vector<Tensor>&
     // Validate input tensors
     if (runtime_input.isNil()) {
       MLLM_ERROR("Input tensor {} is nil for graph '{}'", i, graphName);
-      return;
+      return false;
     }
 
     // Case of executing retrieved graph created by AOT
@@ -587,7 +610,7 @@ void QNNBackend::graphExecute(const std::string& graphName, std::vector<Tensor>&
     // Validate output tensors
     if (runtime_output.isNil()) {
       MLLM_ERROR("Output tensor {} is nil for graph '{}'", j, graphName);
-      return;
+      return false;
     }
 
     // output wrapper is empty, set wrapper's dataContainer(mllm::Tensor)
@@ -598,10 +621,16 @@ void QNNBackend::graphExecute(const std::string& graphName, std::vector<Tensor>&
     qnn_outputs.push_back(*(wrapper->getNativeTensor()));
   }
 
-  CALL_QNN(runtime_->qnnInterface.graphExecute(model->getQnnGraph(), qnn_inputs.data(), qnn_inputs.size(), qnn_outputs.data(),
-                                               qnn_outputs.size(), runtime_->profileHandle, nullptr));
+  auto err = runtime_->qnnInterface.graphExecute(model->getQnnGraph(), qnn_inputs.data(), qnn_inputs.size(), qnn_outputs.data(),
+                                                 qnn_outputs.size(), runtime_->profileHandle, nullptr);
+  if (outErr) { *outErr = err; }
+  if ((err & 0xFFFF) != QNN_SUCCESS) {
+    MLLM_ERROR("QNN graphExecute failed for '{}' (err=0x{:x})", graphName, (uint32_t)err);
+    return false;
+  }
 
   if (ProfilingLevel::OFF != profilingLevel_) { extractBackendProfilingInfo(runtime_->profileHandle); }
+  return true;
 }
 
 bool QNNBackend::addTensor(const std::string& graphName, const std::string& tensorName, Qnn_TensorType_t type,

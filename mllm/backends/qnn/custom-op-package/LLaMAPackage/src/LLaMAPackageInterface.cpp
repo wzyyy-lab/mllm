@@ -21,6 +21,8 @@ BEGIN_PKG_OPS_OPTS_LIST()
  */
 DECLARE_PKG_OPS_OPTS_LIST(PKG_RMSNorm)
 DECLARE_PKG_OPS_OPTS_LIST(PKG_KVCache)
+DECLARE_PKG_OPS_OPTS_LIST(PKG_PDKVCacheUpdate)
+DECLARE_PKG_OPS_OPTS_LIST(PKG_FusedPDAttention)
 DECLARE_PKG_OPS_OPTS_LIST(PKG_LLaMADequantizeAdd)
 DECLARE_PKG_OPS_OPTS_LIST(PKG_LLaMAMul)
 DECLARE_PKG_OPS_OPTS_LIST(PKG_LLaMAReLU)
@@ -42,9 +44,10 @@ END_PKG_OPS_OPTS_LIST()
 // op package info
 static constexpr auto sg_packageName = THIS_PKG_NAME_STR;  // package name passed in as compile flag
 
-static std::array<const char*, 17> sg_opNames{{"RMSNorm", "KVCache", "LLaMADequantizeAdd", "LLaMAMul", "LLaMAReLU",
-                                               "CausalMask", "SiLU", "QLayerNorm", "RoPE", "RoPESimple", "WNop", "LLaMAAdd",
-                                               "IRoPE", "LLaMALinear", "LLaMADequantize", "LLaMASuperSiLU", "LLaMAQuantize"}};
+static std::array<const char*, 19> sg_opNames{{"RMSNorm", "KVCache", "PDKVCacheUpdate", "FusedPDAttention", "LLaMADequantizeAdd",
+                                               "LLaMAMul", "LLaMAReLU", "CausalMask", "SiLU", "QLayerNorm", "RoPE", "RoPESimple",
+                                               "WNop", "LLaMAAdd", "IRoPE", "LLaMALinear", "LLaMADequantize", "LLaMASuperSiLU",
+                                               "LLaMAQuantize"}};
 
 static Qnn_ApiVersion_t sg_sdkApiVersion = QNN_HTP_API_VERSION_INIT;
 static QnnOpPackage_Info_t sg_packageInfo = QNN_OP_PACKAGE_INFO_INIT;
@@ -227,6 +230,14 @@ Qnn_ErrorHandle_t LLaMAPackageValidateOpConfig(Qnn_OpConfig_t opConfig) {
     }
   } else if (std::string(opConfig.v1.typeName) == "KVCache") {
     if (opConfig.v1.numOfParams != 1 || opConfig.v1.numOfInputs != 2 || opConfig.v1.numOfOutputs != 1) {
+      return QNN_OP_PACKAGE_ERROR_VALIDATION_FAILURE;
+    }
+  } else if (std::string(opConfig.v1.typeName) == "PDKVCacheUpdate") {
+    if (opConfig.v1.numOfParams != 0 || opConfig.v1.numOfInputs != 9 || opConfig.v1.numOfOutputs != 2) {
+      return QNN_OP_PACKAGE_ERROR_VALIDATION_FAILURE;
+    }
+  } else if (std::string(opConfig.v1.typeName) == "FusedPDAttention") {
+    if (opConfig.v1.numOfParams != 0 || opConfig.v1.numOfInputs != 17 || opConfig.v1.numOfOutputs != 1) {
       return QNN_OP_PACKAGE_ERROR_VALIDATION_FAILURE;
     }
   } else if (std::string(opConfig.v1.typeName) == "LLaMADequantizeAdd") {

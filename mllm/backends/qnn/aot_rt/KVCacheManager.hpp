@@ -9,6 +9,7 @@
 #include "mllm/core/Storage.hpp"
 #include "mllm/backends/base/Allocator.hpp"
 #include "mllm/backends/qnn/aot_rt/QnnAOTConfig.hpp"
+#include "mllm/utils/Common.hpp"
 
 namespace mllm::qnn::aot {
 
@@ -28,6 +29,19 @@ class KVCacheManager {
 
   void initCache(mllm::Allocator* allocator, int32_t ar_len);
   void rearrangeCache(int32_t ar_len_dst);
+
+  // Share output buffers with another cache manager. This is useful when a single graph execution
+  // produces KV outputs that should be consumed by multiple KVCacheManager instances (e.g. PD fusion).
+  void aliasOutputBuffersFrom(const KVCacheManager<T>& other) {
+    MLLM_RT_ASSERT(other.k_cache_.size() == k_cache_.size());
+    MLLM_RT_ASSERT(other.v_cache_.size() == v_cache_.size());
+    for (size_t layer = 0; layer < k_cache_.size(); ++layer) {
+      k_cache_[layer].output_buffer_storage = other.k_cache_[layer].output_buffer_storage;
+      k_cache_[layer].output_buffer = other.k_cache_[layer].output_buffer;
+      v_cache_[layer].output_buffer_storage = other.v_cache_[layer].output_buffer_storage;
+      v_cache_[layer].output_buffer = other.v_cache_[layer].output_buffer;
+    }
+  }
 
   void initAttentionMask(uint16_t* attention_mask, const std::vector<int32_t>& attention_map, int32_t ar_len, int32_t n_past);
 

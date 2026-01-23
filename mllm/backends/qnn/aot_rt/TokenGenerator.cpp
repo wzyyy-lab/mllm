@@ -1,5 +1,6 @@
 #include "mllm/backends/qnn/aot_rt/TokenGenerator.hpp"
 #include "mllm/preprocessor/tokenizers/Unicode.hpp"
+#include <algorithm>
 #include <cstring>
 #include <utility>
 
@@ -38,7 +39,7 @@ void TokenGenerator<T>::init_io() {
   const auto& v_caches = kv_manager_->getVCache();
   // K
   for (int l = 0; l < config_.num_layers; ++l) {
-    auto k_tensor = Tensor::empty({1, (int)config_.num_heads, config_.head_dim, config_.context_len}, config_.kv_dtype, kQNN);
+    auto k_tensor = Tensor::empty({1, (int)config_.num_heads, config_.head_dim, config_.context_len - 1}, config_.kv_dtype, kQNN);
     k_tensor.impl()->storage()->ptr_ = k_caches[l].buffer;
     k_tensor.impl()->storage()->mem_type_ = kManual;
     k_tensor.setName("past_key_" + std::to_string(l));
@@ -113,6 +114,19 @@ int64_t TokenGenerator<T>::generate(std::vector<uint64_t>& tokens, int64_t start
     if (current_pos >= config_.context_len) { break; }
 
     prepare_io(next_token, current_pos);
+
+    // Prepare attention_mask: [1, 1, 1, context_len], allowed=65535, masked=0
+    // Layout matches KVCacheManager::initAttentionMask for ar_len=1:
+    // - past KV: columns [0..context_len-2]
+    // - current token: column [context_len-1]
+    constexpr uint16_t kMasked = 0;
+    constexpr uint16_t kAllowed = 65535;
+    auto* mask = input_tensors_[2].ptr<uint16_t>();
+    std::fill_n(mask, config_.context_len, kMasked);
+    const int32_t past_len = config_.context_len - 1;
+    const int32_t n_past = std::min<int32_t>(std::max<int32_t>(0, (int32_t)current_pos), past_len);
+    std::fill_n(mask, n_past, kAllowed);
+    mask[past_len] = kAllowed;
 
     // Run forward
     auto module_input = input_tensors_;

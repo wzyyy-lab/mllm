@@ -31,6 +31,7 @@
 #include "mllm/backends/qnn/aot/visitor/Repeat.hpp"
 #include "mllm/backends/qnn/aot/visitor/Softmax.hpp"
 #include "mllm/backends/qnn/aot/visitor/Where.hpp"
+#include "mllm/backends/qnn/aot/visitor/Customized.hpp"
 
 namespace mllm::qnn::aot {
 
@@ -40,6 +41,8 @@ LLM2QnnLoweringPass::LLM2QnnLoweringPass() {
                    QnnAOTTransposePattern, QnnAOTSlicePattern, QnnAOTConcatPattern, QnnAOTRepeatPattern, QnnAOTMatMulPattern,
                    QnnAOTReduceMaxPattern, QnnAOTReduceMinPattern, QnnAOTReduceMeanPattern, QnnAOTReduceSumPattern,
                    QnnAOTEqualPattern, QnnAOTWherePattern, QnnAOTSoftmaxPattern, QnnAOTSigmoidPattern, QnnAOTConv2DPattern>();
+  // Backend-specific customized ops (LLaMAPackage)
+  registerPatterns<QnnAOTPDKVCacheUpdatePattern, QnnAOTFusedPDAttentionPattern>();
 }
 
 uint8_t LLM2QnnLoweringPass::run(const ir::node_ptr_t& op) {
@@ -87,12 +90,14 @@ uint8_t LLM2QnnLoweringPass::run(const ir::node_ptr_t& op) {
     }
   }
 
-  // Validate that we only have the expected subgraphs: model, model.0.s32, model.1.s16, etc.
-  // Pattern: model.x.sN where x is a number and N can be 16, 32, 64, 96, etc.
-  std::regex model_pattern(R"(^model(\.\d+\.s\d+)?$)");
+  // Validate that we only have the expected subgraphs:
+  // - model
+  // - model.x.sN         (normal)
+  // - model.x.pd.sN      (PD fusion renamed by PDFusionPass)
+  std::regex model_pattern(R"(^model(\.\d+(\.pd)?\.s\d+)?$)");
   for (const auto& [name, _] : subgraphs) {
     if (!std::regex_match(name, model_pattern)) {
-      MLLM_ERROR("LLM2QnnLoweringPass: Unexpected subgraph name {}, expected pattern: model or model.x.sx", name);
+      MLLM_ERROR("LLM2QnnLoweringPass: Unexpected subgraph name {}, expected pattern: model or model.x(.pd).sN", name);
       return ir::PASS_RET_FAILURE;
     }
   }
@@ -103,11 +108,11 @@ uint8_t LLM2QnnLoweringPass::run(const ir::node_ptr_t& op) {
     if (name != "model") { subgraph_map_[name] = subgraph; }
   }
 
-  // Validate that at least one model.x.sN subgraph exists (required for the lowering)
-  // We don't require specifically model.0.s32, but any model.x.sN pattern
+  // Validate that at least one leaf graph exists (required for the lowering).
+  // We don't require specifically model.0.s32, but any model.x(.pd).sN pattern.
   bool has_valid_subgraph = false;
   for (const auto& [name, _] : subgraph_map_) {
-    if (std::regex_match(name, std::regex(R"(^model\.\d+\.s\d+$)"))) {
+    if (std::regex_match(name, std::regex(R"(^model\.\d+(\.pd)?\.s\d+$)"))) {
       has_valid_subgraph = true;
       break;
     }
@@ -132,7 +137,7 @@ uint8_t LLM2QnnLoweringPass::run(const ir::node_ptr_t& op) {
   {
     int split_graph = aot_cfg["split_graph"];
     MLLM_RT_ASSERT_EQ(split_graph, 1);
-    aot_env->createContext("context.0", true);
+    if (!aot_env->getContext("context.0")) { aot_env->createContext("context.0", true); }
   }
 
   // Process each subgraph in order

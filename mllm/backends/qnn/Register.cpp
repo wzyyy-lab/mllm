@@ -40,5 +40,18 @@ void initQnnBackend(const std::string& context_path) {
   // register QNN custom ops
   Context::instance().registerCustomizedOp(kQNN, "DequantizeAdd",
                                            std::shared_ptr<BaseOpFactory>((BaseOpFactory*)(new qnn::DequantizeAddFactory())));
+  Context::instance().registerCustomizedOp(
+      kQNN, "PDKVCacheUpdate",
+      std::shared_ptr<BaseOpFactory>((BaseOpFactory*)(new qnn::PDKVCacheUpdateFactory())));
+  Context::instance().registerCustomizedOp(
+      kQNN, "FusedPDAttention",
+      std::shared_ptr<BaseOpFactory>((BaseOpFactory*)(new qnn::FusedPDAttentionFactory())));
+  // Also register under CPU so tracing/AOT compilation can create the op without requiring a QNN backend.
+  Context::instance().registerCustomizedOp(
+      kCPU, "PDKVCacheUpdate",
+      std::shared_ptr<BaseOpFactory>((BaseOpFactory*)(new qnn::PDKVCacheUpdateFactory())));
+  Context::instance().registerCustomizedOp(
+      kCPU, "FusedPDAttention",
+      std::shared_ptr<BaseOpFactory>((BaseOpFactory*)(new qnn::FusedPDAttentionFactory())));
 }
 }  // namespace mllm

@@ -257,6 +257,20 @@ class LLMQuantRecipeWherePattern : public ir::Pattern {
 };
 
 //===----------------------------------------------------------------------===//
+// CustomizedOp Pattern (backend-specific)
+//===----------------------------------------------------------------------===//
+class LLMQuantRecipeCustomizedPattern : public ir::Pattern {
+ public:
+  bool isMatch(const mllm::ir::op_ptr_t& op) override;
+
+  bool rewrite(ir::IRWriter& writer, const ir::op_ptr_t& node) override;
+
+  static inline std::shared_ptr<LLMQuantRecipeCustomizedPattern> create() {
+    return std::make_shared<LLMQuantRecipeCustomizedPattern>();
+  }
+};
+
+//===----------------------------------------------------------------------===//
 // Softmax Pattern
 //===----------------------------------------------------------------------===//
 class LLMQuantRecipeSoftmaxPattern : public ir::Pattern {

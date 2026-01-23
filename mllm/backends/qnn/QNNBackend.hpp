@@ -106,6 +106,11 @@ class QNNBackend final : public Backend {
 
   void graphExecute(const std::string& graphName, std::vector<Tensor>& inputs, std::vector<Tensor>& outputs);
 
+  // Execute without aborting on backend errors (useful for probing aliasing constraints / fallbacks).
+  // Returns true on success; on failure, writes the QNN error handle to outErr if provided.
+  bool graphExecuteChecked(const std::string& graphName, std::vector<Tensor>& inputs, std::vector<Tensor>& outputs,
+                           Qnn_ErrorHandle_t* outErr = nullptr);
+
   // Tensor management interfaces
   bool addTensor(const std::string& graphName, const std::string& tensorName, Qnn_TensorType_t type, const Tensor& tensor,
                  Qnn_QuantizeParams_t quantize = DEFAULT_QUANTIZE_PARAMS);

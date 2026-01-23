@@ -2,6 +2,8 @@
 // Licensed under the MIT License.
 #include <memory>
 #include <fstream>
+#include <unordered_set>
+#include <cstdlib>
 
 #include <QnnTypes.h>
 
@@ -102,7 +104,12 @@ Qnn_DataType_t QnnAOTNodeTensor::parseQnnDataTypeFromIR(const ir::tensor::Tensor
   return mllm::qnn::mllmDataTypeToQnnDataType(v->tensor_.dtype());
 }
 
-std::string QnnAOTNodeTensor::parseQnnTensorNameFromIR(const ir::tensor::TensorValue::ptr_t& v) { return v->name(); }
+std::string QnnAOTNodeTensor::parseQnnTensorNameFromIR(const ir::tensor::TensorValue::ptr_t& v) {
+  // Parameter/global tensors carry a stable SymbolAttr (Tensor::name()).
+  // Prefer it so that AOT multi-graph builds can share static weights in the same QNN context.
+  if (v->hasSymbolAttr()) { return v->getSymbolAttr()->str(); }
+  return v->name();
+}
 
 Qnn_QuantizeParams_t QnnAOTNodeTensor::parseQnnQuantizeParamFromIR(const ir::tensor::TensorValue::ptr_t& v) {
   Qnn_QuantizeParams_t ret = QNN_QUANTIZE_PARAMS_INIT;
@@ -438,6 +445,43 @@ std::shared_ptr<QnnDeviceAndContext> QnnAOTEnv::createContext(const std::string&
   MLLM_RT_ASSERT_EQ(QNN_BACKEND_NO_ERROR, qnn_htp_func_symbols_.qnn_interface_.backendCreate(context->log_, (const QnnBackend_Config_t**)context->bk_cfg_, &context->bk_handle_))
   // clang-format on
 
+  // 1.5 Register custom op packages (e.g. LLaMAPackage) so AOT graphs can include custom ops.
+  // This mirrors runtime behavior in QNNBackend.cpp, but is optional to keep host builds flexible.
+  if (qnn_htp_func_symbols_.qnn_interface_.backendRegisterOpPackage) {
+    struct OpPackageInfo {
+      const char* filename;
+      const char* interfaceProvider;
+      const char* target;
+    };
+
+    const char* op_pkg_dir = std::getenv("MLLM_QNN_OP_PACKAGE_DIR");
+    auto resolvePath = [&](const char* fname) -> std::string {
+      if (!op_pkg_dir || std::string(op_pkg_dir).empty()) { return std::string(fname); }
+      std::string dir(op_pkg_dir);
+      if (!dir.empty() && dir.back() != '/' && dir.back() != '\\') { dir.push_back('/'); }
+      return dir + fname;
+    };
+
+    const OpPackageInfo pkgs[] = {
+        {"libQnnLLaMAPackage_CPU.so", "LLaMAPackageInterfaceProvider", "CPU"},
+        {"libQnnLLaMAPackage_HTP.so", "LLaMAPackageInterfaceProvider", "HTP"},
+    };
+
+    for (const auto& pkg : pkgs) {
+      const std::string path = resolvePath(pkg.filename);
+      auto status = qnn_htp_func_symbols_.qnn_interface_.backendRegisterOpPackage(context->bk_handle_, path.c_str(),
+                                                                                  pkg.interfaceProvider, pkg.target);
+      if (status != QNN_SUCCESS) {
+        MLLM_WARN("QnnAOTEnv: failed to register OpPackage '{}' (provider='{}', target='{}'), status={}",
+                  path, pkg.interfaceProvider, pkg.target, (int)status);
+      } else {
+        MLLM_INFO("QnnAOTEnv: registered OpPackage '{}' (provider='{}', target='{}')", path, pkg.interfaceProvider, pkg.target);
+      }
+    }
+  } else {
+    MLLM_WARN("QnnAOTEnv: backendRegisterOpPackage not available; custom ops (LLaMAPackage) may not compile in AOT");
+  }
+
   // 2. Create HTP Device
   // clang-format off
   if (nullptr != qnn_htp_func_symbols_.qnn_interface_.deviceCreate) {
@@ -491,6 +535,23 @@ void QnnAOTEnv::saveContext(const std::string& name, const std::string& path) {
     return;
   }
   auto context = contexts_[name];
+
+  // Lightweight sanity metrics for multi-graph builds: if PD+decode graphs are compiled into the same context with
+  // weight sharing, the number of cached static tensors should NOT double (it is keyed by stable tensor names).
+  {
+    size_t static_count = context->static_tensor_.size();
+    size_t approx_static_bytes = 0;
+    std::unordered_set<const void*> unique_ptrs;
+    unique_ptrs.reserve(static_count);
+    for (const auto& [_, t] : context->static_tensor_) {
+      if (!t || !t->getWrapper()) continue;
+      auto& c = t->getWrapper()->getDataContainer();
+      approx_static_bytes += c.bytes();
+      unique_ptrs.insert(c.ptr<void>());
+    }
+    MLLM_INFO("QNN context '{}' static tensors: {} (unique_ptrs={}, approx_bytes={})", name, static_count, unique_ptrs.size(),
+              approx_static_bytes);
+  }
 
   uint64_t binarySize = 0;
   uint64_t writtenSize = 0;
@@ -617,8 +678,6 @@ void QnnAOTEnv::captureAOTNodeOp(const std::string& qnn_context_name, const std:
 
 QnnAOTNodeTensor::ptr_t QnnAOTEnv::captureQnnAOTNodeTensor(const std::string& qnn_context_name, const std::string& graph_name,
                                                            const ir::tensor::TensorValue::ptr_t& v, bool force_static_weight) {
-  auto __qnn_tensor_name = v->name();
-
   bool __qnn_enable_static_weight = force_static_weight;
 
   // Check if this value want static qnn weight. The static qnn weight will be shared through one context in diff graphs!
@@ -626,6 +685,13 @@ QnnAOTNodeTensor::ptr_t QnnAOTEnv::captureQnnAOTNodeTensor(const std::string& qn
       || v->getAttr("constant")) {
     __qnn_enable_static_weight = true;
   }
+
+  // IMPORTANT:
+  // - v->name() is a per-trace UUID string, so using it as the cache key breaks cross-graph weight sharing
+  //   when you trace/build multiple graphs in the same context (e.g. PD graph + decode-only graph).
+  // - Parameter/global tensors carry a stable SymbolAttr (Tensor::name()) that we should use as the QNN tensor name
+  //   and as the static-tensor cache key.
+  const auto __qnn_tensor_name = (__qnn_enable_static_weight && v->hasSymbolAttr()) ? v->getSymbolAttr()->str() : v->name();
 
   MLLM_RT_ASSERT_EQ(contexts_.count(qnn_context_name), 1);
   MLLM_RT_ASSERT_EQ(contexts_[qnn_context_name]->graphs_.count(graph_name), 1);
@@ -655,6 +721,10 @@ QnnAOTNodeTensor::ptr_t QnnAOTEnv::captureQnnAOTNodeTensor(const std::string& qn
   return ret;
 }
 
-std::shared_ptr<QnnDeviceAndContext> QnnAOTEnv::getContext(const std::string& name) { return contexts_[name]; }
+std::shared_ptr<QnnDeviceAndContext> QnnAOTEnv::getContext(const std::string& name) {
+  auto it = contexts_.find(name);
+  if (it == contexts_.end()) { return nullptr; }
+  return it->second;
+}
 
 }  // namespace mllm::qnn::aot

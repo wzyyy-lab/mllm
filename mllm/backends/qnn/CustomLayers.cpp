@@ -22,6 +22,20 @@ DequantizeAdd::DequantizeAdd(DataTypes dtype, int32_t out_channels)
   this->impl()->__forceSetDevice(kQNN);
 }
 
+PDKVCacheUpdate::PDKVCacheUpdate() : Layer(OpTypes::kDynamicOp_Start, PDKVCacheUpdateOpOptions{}) {
+  // NOTE: For AOT compilation/tracing we do not require a live QNN backend in Context.
+  // Register this customized op under the CPU backend (see examples) so it can be traced, then
+  // AOT lowering will emit it as a QNN custom op (LLaMAPackage) via QnnAOTPDKVCacheUpdatePattern.
+  this->impl()->__forceSetOpType((mllm::OpTypes)mllm::Context::instance().lookupCustomizedOpId(mllm::kCPU, "PDKVCacheUpdate"));
+  this->impl()->__forceSetDevice(kCPU);
+}
+
+FusedPDAttention::FusedPDAttention() : Layer(OpTypes::kDynamicOp_Start, FusedPDAttentionOpOptions{}) {
+  // Same tracing trick as PDKVCacheUpdate: create the op under CPU so AOT can trace without a live QNN backend.
+  this->impl()->__forceSetOpType((mllm::OpTypes)mllm::Context::instance().lookupCustomizedOpId(mllm::kCPU, "FusedPDAttention"));
+  this->impl()->__forceSetDevice(kCPU);
+}
+
 }  // namespace mllm::nn::qnn
 
 // -------------------- Custom QNN Ops --------------------
@@ -61,6 +75,37 @@ void DequantizeAddOp::reshape(const std::vector<mllm::Tensor>& inputs, std::vect
   const auto& input = inputs[0];
 
   outputs.emplace_back(Tensor::empty(input.shape(), options_.dtype, input.device()));
+}
+
+void PDKVCacheUpdateOp::trace(void* trace_context, const std::vector<mllm::Tensor>& inputs, std::vector<mllm::Tensor>& outputs) {
+  auto ir_ctx = (ir::IRContext*)trace_context;
+  auto i_irs = ir::tensor::wrapTensors2TensorIR(ir_ctx, inputs);
+  auto o_irs = ir::tensor::wrapTensors2TensorIR(ir_ctx, outputs);
+  ir_ctx->create<ir::linalg::CustomizedOp>(shared_from_this(), i_irs, o_irs);
+}
+
+void PDKVCacheUpdateOp::reshape(const std::vector<mllm::Tensor>& inputs, std::vector<mllm::Tensor>& outputs) {
+  // Inputs:
+  //   dep, in_k_cache, in_v_cache, present_k, present_v, n_past, src_offset, n_update, enable
+  MLLM_RT_ASSERT_EQ((int)inputs.size(), 9);
+  outputs.emplace_back(Tensor::empty(inputs[1].shape(), inputs[1].dtype(), inputs[1].device()));
+  outputs.emplace_back(Tensor::empty(inputs[2].shape(), inputs[2].dtype(), inputs[2].device()));
+}
+
+void FusedPDAttentionOp::trace(void* trace_context, const std::vector<mllm::Tensor>& inputs, std::vector<mllm::Tensor>& outputs) {
+  auto ir_ctx = (ir::IRContext*)trace_context;
+  auto i_irs = ir::tensor::wrapTensors2TensorIR(ir_ctx, inputs);
+  auto o_irs = ir::tensor::wrapTensors2TensorIR(ir_ctx, outputs);
+  ir_ctx->create<ir::linalg::CustomizedOp>(shared_from_this(), i_irs, o_irs);
+}
+
+void FusedPDAttentionOp::reshape(const std::vector<mllm::Tensor>& inputs, std::vector<mllm::Tensor>& outputs) {
+  // Inputs (v0):
+  //   q, k_curr, v_curr, past_k_prefill, past_v_prefill, past_k_decode, past_v_decode, attention_mask, fusion_ctrl,
+  //   q_scale, q_zp, k_scale, k_zp, v_scale, v_zp, out_scale, out_zp
+  MLLM_RT_ASSERT_EQ((int)inputs.size(), 17);
+  const auto& q = inputs[0];
+  outputs.emplace_back(Tensor::empty(q.shape(), q.dtype(), q.device()));
 }
 
 }  // namespace mllm::qnn
