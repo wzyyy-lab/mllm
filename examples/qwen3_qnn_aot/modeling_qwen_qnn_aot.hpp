@@ -271,7 +271,9 @@ class Qwen3Attention final : public nn::Module {
     value_states = ptq::QDQ_KV(this, value_states, "v_cast_to_int8_qdq");
 
     if (!pd_fusion) {
-      auto kh = nn::functional::concat({past_key, key_states}, -1);     // [B, H, D, S]
+      // past_key is token-major cache: [B, H_kv, L, D], but attention math expects [B, H_kv, D, L]
+      auto past_key_dm = past_key.transpose(2, 3);
+      auto kh = nn::functional::concat({past_key_dm, key_states}, -1);  // [B, H_kv, D, S]
       auto vh = nn::functional::concat({past_value, value_states}, 2);  // [B, H, S, D]
 
       // Repeat
@@ -346,7 +348,9 @@ class Qwen3Attention final : public nn::Module {
     // Prefill branch
     auto q0 = query_states.slice({kAll, kAll, {0, prefill_len}, kAll}, /*ssa=*/true);
     auto m0 = causal_mask.slice({kAll, kAll, {0, prefill_len}, kAll}, /*ssa=*/true);
-    auto kh0 = nn::functional::concat({past_key, key_states}, -1).repeat(num_key_value_groups_, 1);
+    // past_key is token-major cache: [B, H_kv, L, D], but attention math expects [B, H_kv, D, L]
+    auto past_key_dm = past_key.transpose(2, 3);
+    auto kh0 = nn::functional::concat({past_key_dm, key_states}, -1).repeat(num_key_value_groups_, 1);
     auto vh0 = nn::functional::concat({past_value, value_states}, 2).repeat(num_key_value_groups_, 1);
 
     auto attn0 = ptq::QDQ(this, nn::functional::matmul(q0, kh0), "qk_matmul_output_qdq");
@@ -366,7 +370,9 @@ class Qwen3Attention final : public nn::Module {
     // Decode branch
     auto q1 = query_states.slice({kAll, kAll, {decode_idx, decode_idx + 1}, kAll}, /*ssa=*/true);
     auto m1 = causal_mask.slice({kAll, kAll, {decode_idx, decode_idx + 1}, kAll}, /*ssa=*/true);
-    auto kh1 = nn::functional::concat({past_key_decode, key_states}, -1).repeat(num_key_value_groups_, 1);
+    // past_key_decode is token-major cache: [B, H_kv, L, D], but attention math expects [B, H_kv, D, L]
+    auto past_key_decode_dm = past_key_decode.transpose(2, 3);
+    auto kh1 = nn::functional::concat({past_key_decode_dm, key_states}, -1).repeat(num_key_value_groups_, 1);
     auto vh1 = nn::functional::concat({past_value_decode, value_states}, 2).repeat(num_key_value_groups_, 1);
 
     auto attn1 = ptq::QDQ(this, nn::functional::matmul(q1, kh1), "qk_matmul_output_qdq");

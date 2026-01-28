@@ -43,8 +43,9 @@ MLLM_MAIN({
   model.load(params);
 
   // Sequence: [B, N]
-  // past_key_i: [B, H, D, CL-N] for each layer i
-  // past_value_i: [B, H, CL-N, D] for each layer i
+  // KV caches (token-major):
+  //   past_key_i:   [B, H_kv, CL-N, D] for each layer i
+  //   past_value_i: [B, H_kv, CL-N, D] for each layer i
   // causal_mask: [B, 1, N, CL]
   auto sequence = mllm::Tensor::zeros({1, N}, mllm::kInt32);
   auto causal_mask = mllm::Tensor::zeros({1, 1, N, CL}, mllm::kUInt16);
@@ -62,10 +63,15 @@ MLLM_MAIN({
     trace_inputs[past_key_name] = mllm::Tensor::empty({
         1,
         model_cfg.num_key_value_heads,
-        model_cfg.head_dim,
         CL - N,
+        model_cfg.head_dim,
     }, mllm::kUInt8PerTensorSym);
-    trace_inputs[past_value_name] = mllm::Tensor::empty({1, model_cfg.num_key_value_heads, CL - N, model_cfg.head_dim}, mllm::kUInt8PerTensorSym);
+    trace_inputs[past_value_name] = mllm::Tensor::empty({
+        1,
+        model_cfg.num_key_value_heads,
+        CL - N,
+        model_cfg.head_dim,
+    }, mllm::kUInt8PerTensorSym);
     
     trace_inputs[past_key_name].attach("scale", params->pull("model.layers." + std::to_string(i) + ".self_attn.k_cast_to_int8_qdq.fake_quant.scale").impl(), true);
     trace_inputs[past_key_name].attach("zero_point", params->pull("model.layers." + std::to_string(i) + ".self_attn.k_cast_to_int8_qdq.fake_quant.zero_point").impl(), true);

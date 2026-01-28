@@ -92,8 +92,8 @@ MLLM_MAIN({
   trace_inputs["fusion_ctrl"] = fusion_ctrl;
 
   // KV cache shapes (KV heads):
-  // past_key_*:   [B, H_kv, D, CL-N]
-  // past_value_*: [B, H_kv, CL-N, D]
+  //   K cache uses token-major layout: [B, H_kv, CL-N, D] (D contiguous per token)
+  //   V cache is already token-major:  [B, H_kv, CL-N, D]
   const int H_kv = model_cfg.num_key_value_heads;
   const int D = model_cfg.head_dim;
   const int past_len = CL - N;
@@ -111,9 +111,9 @@ MLLM_MAIN({
     const auto k1_name = "past_key_decode_" + std::to_string(i);
     const auto v1_name = "past_value_decode_" + std::to_string(i);
 
-    auto k0 = mllm::Tensor::empty({1, H_kv, D, past_len}, mllm::kUInt8PerTensorSym).setName(k0_name);
+    auto k0 = mllm::Tensor::empty({1, H_kv, past_len, D}, mllm::kUInt8PerTensorSym).setName(k0_name);
     auto v0 = mllm::Tensor::empty({1, H_kv, past_len, D}, mllm::kUInt8PerTensorSym).setName(v0_name);
-    auto k1 = mllm::Tensor::empty({1, H_kv, D, past_len}, mllm::kUInt8PerTensorSym).setName(k1_name);
+    auto k1 = mllm::Tensor::empty({1, H_kv, past_len, D}, mllm::kUInt8PerTensorSym).setName(k1_name);
     auto v1 = mllm::Tensor::empty({1, H_kv, past_len, D}, mllm::kUInt8PerTensorSym).setName(v1_name);
 
     k0.attach("scale", k_scale.impl(), true);

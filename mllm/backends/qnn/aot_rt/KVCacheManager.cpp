@@ -192,21 +192,22 @@ void KVCacheManager<T>::rearrangeKey(KVCache<T>& k_cache, int32_t ar_len_dst) {
   T* k_cache_in_read_ptr = k_cache.buffer;
   T* k_cache_in_write_ptr = k_cache.buffer;
 
+  // Key cache uses token-major layout matching value cache:
+  //   [H, past_len, D] (D contiguous per token).
+  // Therefore rearrange is identical to rearrangeValue().
   if (src_cache_num > dst_cache_num) {
-    // copy from first dimension
-    for (int i = 0; i < config_.head_dim * config_.num_heads; i++) {
-      std::memmove(k_cache_in_write_ptr, k_cache_in_read_ptr, dst_cache_num * sizeof(T));
-      k_cache_in_read_ptr += src_cache_num;
-      k_cache_in_write_ptr += dst_cache_num;
+    for (int i = 0; i < config_.num_heads; i++) {
+      std::memmove(k_cache_in_write_ptr, k_cache_in_read_ptr, dst_cache_num * config_.head_dim * sizeof(T));
+      k_cache_in_read_ptr += src_cache_num * config_.head_dim;
+      k_cache_in_write_ptr += dst_cache_num * config_.head_dim;
     }
   } else {
-    k_cache_in_read_ptr += (config_.head_dim * config_.num_heads - 1) * src_cache_num;
-    k_cache_in_write_ptr += (config_.head_dim * config_.num_heads - 1) * dst_cache_num;
-    // copy from last dimension
-    for (int i = 0; i < config_.head_dim * config_.num_heads; i++) {
-      std::memmove(k_cache_in_write_ptr, k_cache_in_read_ptr, src_cache_num * sizeof(T));
-      k_cache_in_read_ptr -= src_cache_num;
-      k_cache_in_write_ptr -= dst_cache_num;
+    k_cache_in_read_ptr += config_.head_dim * (config_.num_heads - 1) * src_cache_num;
+    k_cache_in_write_ptr += config_.head_dim * (config_.num_heads - 1) * dst_cache_num;
+    for (int i = 0; i < config_.num_heads; i++) {
+      std::memmove(k_cache_in_write_ptr, k_cache_in_read_ptr, src_cache_num * config_.head_dim * sizeof(T));
+      k_cache_in_read_ptr -= src_cache_num * config_.head_dim;
+      k_cache_in_write_ptr -= dst_cache_num * config_.head_dim;
     }
   }
 }
@@ -251,30 +252,57 @@ void KVCacheManager<T>::updateCache(int32_t ar_len, int32_t n_past, int32_t n_up
 
 template<typename T>
 void KVCacheManager<T>::updateKey(KVCache<T>& k_cache, int32_t n_past, int32_t n_update, const std::vector<bool>& selected) {
-  T* write_ptr = k_cache.buffer;
-  T* read_ptr = k_cache.output_buffer;
-  const int32_t copy_size = n_update * sizeof(T);
-  const int32_t iter_size = (cur_ar_len_ == config_.context_len) ? config_.context_len : config_.context_len - cur_ar_len_;
-  const int32_t out_size = cur_ar_len_;
-  const int32_t past_size = n_past;
-  const int32_t n_iter = config_.head_dim * config_.num_heads;
+  // Key cache uses token-major layout matching value cache:
+  //   cache buffer:  [H, past_len, D] (D contiguous)
+  //   graph output:  present_key = [H, D, ar_len] (D-major, ar_len last)
+  //
+  // This function transposes from present_key to cache layout while updating only the [n_past .. n_past+n_update) span.
+  T* cache_ptr = k_cache.buffer;
+  T* present_ptr = k_cache.output_buffer;
 
-  write_ptr += past_size;
-  if (selected.empty()) {
-    for (int i = 0; i < n_iter; ++i) {
-      std::memcpy(write_ptr, read_ptr, copy_size);
-      write_ptr += iter_size;
-      read_ptr += out_size;
+  const int32_t cache_tokens = (cur_ar_len_ == config_.context_len) ? config_.context_len : config_.context_len - cur_ar_len_;
+  const int32_t ar_len = cur_ar_len_;
+  const int32_t head_dim = config_.head_dim;
+  const int32_t n_heads = config_.num_heads;
+
+  if (n_update <= 0) return;
+  if (n_past < 0) n_past = 0;
+  if (n_past >= cache_tokens) return;
+  if (n_past + n_update > cache_tokens) n_update = cache_tokens - n_past;
+  if (n_update <= 0) return;
+
+  // Map "update index" -> "index within ar_len" (for selected sub-updates).
+  std::vector<int32_t> ar_indices;
+  if (!selected.empty()) {
+    ar_indices.reserve(n_update);
+    for (int32_t i = 0; i < (int32_t)selected.size() && (int32_t)ar_indices.size() < n_update; ++i) {
+      if (selected[i]) ar_indices.push_back(i);
     }
-  } else {
-    std::vector<int32_t> true_indices(n_update);
-    for (int i = 0, j = 0; i < selected.size() && j < n_update; ++i) {
-      if (selected[i]) { true_indices[j++] = i; }
+    // Best-effort: if selection didn't provide enough trues, fall back to first n_update positions.
+    if ((int32_t)ar_indices.size() != n_update) {
+      ar_indices.clear();
+      for (int32_t i = 0; i < n_update && i < ar_len; ++i) ar_indices.push_back(i);
     }
-    for (int i = 0; i < n_iter; ++i) {
-      for (int j = 0; j < n_update; ++j) { write_ptr[j] = read_ptr[true_indices[j]]; }
-      write_ptr += iter_size;
-      read_ptr += out_size;
+  }
+
+  // present_ptr layout: ((h * head_dim + d) * ar_len + t)
+  // cache_ptr layout:   (h * cache_tokens + (n_past + t)) * head_dim + d
+  for (int32_t h = 0; h < n_heads; ++h) {
+    T* cache_h = cache_ptr + (size_t)h * (size_t)cache_tokens * (size_t)head_dim + (size_t)n_past * (size_t)head_dim;
+    const T* present_h = present_ptr + (size_t)h * (size_t)head_dim * (size_t)ar_len;
+    if (selected.empty()) {
+      for (int32_t t = 0; t < n_update; ++t) {
+        for (int32_t d = 0; d < head_dim; ++d) {
+          cache_h[(size_t)t * (size_t)head_dim + (size_t)d] = present_h[(size_t)d * (size_t)ar_len + (size_t)t];
+        }
+      }
+    } else {
+      for (int32_t t = 0; t < n_update; ++t) {
+        const int32_t src_t = (t < (int32_t)ar_indices.size()) ? ar_indices[t] : t;
+        for (int32_t d = 0; d < head_dim; ++d) {
+          cache_h[(size_t)t * (size_t)head_dim + (size_t)d] = present_h[(size_t)d * (size_t)ar_len + (size_t)src_t];
+        }
+      }
     }
   }
 }

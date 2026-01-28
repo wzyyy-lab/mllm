@@ -138,9 +138,10 @@ MLLM_MAIN({
       const auto k1_name = "past_key_decode_" + std::to_string(i);
       const auto v1_name = "past_value_decode_" + std::to_string(i);
 
-      auto k0 = mllm::Tensor::empty({1, H_kv, D, past_len}, mllm::kUInt8PerTensorSym).setName(k0_name);
+      // K/V caches are token-major: [B, H_kv, past_len, D] (D contiguous per token)
+      auto k0 = mllm::Tensor::empty({1, H_kv, past_len, D}, mllm::kUInt8PerTensorSym).setName(k0_name);
       auto v0 = mllm::Tensor::empty({1, H_kv, past_len, D}, mllm::kUInt8PerTensorSym).setName(v0_name);
-      auto k1 = mllm::Tensor::empty({1, H_kv, D, past_len}, mllm::kUInt8PerTensorSym).setName(k1_name);
+      auto k1 = mllm::Tensor::empty({1, H_kv, past_len, D}, mllm::kUInt8PerTensorSym).setName(k1_name);
       auto v1 = mllm::Tensor::empty({1, H_kv, past_len, D}, mllm::kUInt8PerTensorSym).setName(v1_name);
 
       k0.attach("scale", k_scale.impl(), true);
@@ -184,7 +185,8 @@ MLLM_MAIN({
       const auto k_name = "past_key_" + std::to_string(i);
       const auto v_name = "past_value_" + std::to_string(i);
 
-      auto k = mllm::Tensor::empty({1, H_kv, D, past_len}, mllm::kUInt8PerTensorSym).setName(k_name);
+      // K/V caches are token-major: [B, H_kv, past_len, D] (D contiguous per token)
+      auto k = mllm::Tensor::empty({1, H_kv, past_len, D}, mllm::kUInt8PerTensorSym).setName(k_name);
       auto v = mllm::Tensor::empty({1, H_kv, past_len, D}, mllm::kUInt8PerTensorSym).setName(v_name);
 
       k.attach("scale", k_scale.impl(), true);

@@ -51,7 +51,7 @@ GraphStatus pdKvCacheUpdateImpl(TensorType& out_k_cache,
    * - Runtime is expected to bind out_* buffers to the same underlying memory as in_* buffers (in-place update).
    *
    * Tensor layouts (Qwen3 AOT example):
-   * - K cache:      [B, H, D, past_len]
+   * - K cache:      [B, H, past_len, D]   (token-major, D contiguous)
    * - V cache:      [B, H, past_len, D]
    * - present_k:    [B, H, D, S]
    * - present_v:    [B, H, S, D]
@@ -70,7 +70,7 @@ GraphStatus pdKvCacheUpdateImpl(TensorType& out_k_cache,
   int32_t n_update_ = static_cast<int32_t>(n_update(0, 0, 0, 0));
   if (n_update_ <= 0) { return GraphStatus::Success; }
 
-  auto [b_k, h_k, d_k, past_len_k] = in_k_cache.dims();
+  auto [b_k, h_k, past_len_k, d_k] = in_k_cache.dims();
   auto [b_v, h_v, past_len_v, d_v] = in_v_cache.dims();
   auto [b_pk, h_pk, d_pk, s_pk] = present_k.dims();
   auto [b_pv, h_pv, s_pv, d_pv] = present_v.dims();
@@ -126,13 +126,23 @@ GraphStatus pdKvCacheUpdateImpl(TensorType& out_k_cache,
     std::memcpy(v_out_ptr, v_in_ptr, total_v_bytes);
   }
 
-  // K cache update: for each (B,H,D), copy n_update along last dim.
+  // K cache update:
+  // - present_k is D-major: [B,H,D,S]
+  // - cache is token-major: [B,H,past_len,D]
+  // We transpose while writing only the updated span.
   for (Idx b = 0; b < b_k; ++b) {
     for (Idx h = 0; h < h_k; ++h) {
-      for (Idx d = 0; d < d_k; ++d) {
-        const size_t dst_base = (((b * h_k + h) * d_k + d) * past_len + (size_t)n_past_) * elem_bytes;
-        const size_t src_base = (((b * h_k + h) * d_k + d) * (size_t)seq_len + (size_t)src_offset_) * elem_bytes;
-        std::memcpy(k_out_ptr + dst_base, pk_ptr + src_base, (size_t)n_update_ * elem_bytes);
+      for (Idx t = 0; t < (Idx)n_update_; ++t) {
+        const int32_t s = src_offset_ + (int32_t)t;
+        const int32_t dst_t = n_past_ + (int32_t)t;
+        if (s < 0 || s >= seq_len) continue;
+        if (dst_t < 0 || dst_t >= past_len) continue;
+        const size_t dst_row_base = (((b * h_k + h) * (size_t)past_len + (size_t)dst_t) * (size_t)d_k) * elem_bytes;
+        for (Idx d = 0; d < d_k; ++d) {
+          const size_t src_off = (((b * h_k + h) * d_k + d) * (size_t)seq_len + (size_t)s) * elem_bytes;
+          const size_t dst_off = dst_row_base + (size_t)d * elem_bytes;
+          std::memcpy(k_out_ptr + dst_off, pk_ptr + src_off, elem_bytes);
+        }
       }
     }
   }

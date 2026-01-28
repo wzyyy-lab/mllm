@@ -233,7 +233,8 @@ void PDFusionRunner::init_pd_io(PDGraphIO& g) {
 
   for (int l = 0; l < config_.num_layers; ++l) {
     // slot0 K
-    auto k0 = Tensor::empty({1, config_.num_heads, config_.head_dim, past_len}, config_.kv_dtype, kQNN);
+    // Scheme A: token-major K cache [B, H, past_len, D] to make per-token D contiguous.
+    auto k0 = Tensor::empty({1, config_.num_heads, past_len, config_.head_dim}, config_.kv_dtype, kQNN);
     k0.impl()->storage()->ptr_ = k_prefill[l].buffer;
     k0.impl()->storage()->mem_type_ = kManual;
     k0.setName(pastKeyName(l, "prefill"));
@@ -249,7 +250,7 @@ void PDFusionRunner::init_pd_io(PDGraphIO& g) {
   }
   for (int l = 0; l < config_.num_layers; ++l) {
     // slot1 K
-    auto k1 = Tensor::empty({1, config_.num_heads, config_.head_dim, past_len}, config_.kv_dtype, kQNN);
+    auto k1 = Tensor::empty({1, config_.num_heads, past_len, config_.head_dim}, config_.kv_dtype, kQNN);
     k1.impl()->storage()->ptr_ = k_decode[l].buffer;
     k1.impl()->storage()->mem_type_ = kManual;
     k1.setName(pastKeyName(l, "decode"));
@@ -295,7 +296,7 @@ void PDFusionRunner::init_pd_io(PDGraphIO& g) {
     // Updated caches for slot0(prefill) and slot1(decode). Runtime binds these outputs to the same shared buffers
     // as the corresponding inputs (in-place update) to avoid CPU memcpy.
     for (int l = 0; l < config_.num_layers; ++l) {
-      auto k_upd0 = Tensor::empty({1, config_.num_heads, config_.head_dim, past_len}, config_.kv_dtype, kQNN);
+      auto k_upd0 = Tensor::empty({1, config_.num_heads, past_len, config_.head_dim}, config_.kv_dtype, kQNN);
       k_upd0.impl()->storage()->ptr_ = kv_prefill_->getKCache()[l].buffer;
       k_upd0.impl()->storage()->mem_type_ = kManual;
       k_upd0.setName(updatedPastKeyName(l, "prefill"));
@@ -309,7 +310,7 @@ void PDFusionRunner::init_pd_io(PDGraphIO& g) {
       g.output_tensors.push_back(v_upd0);
     }
     for (int l = 0; l < config_.num_layers; ++l) {
-      auto k_upd1 = Tensor::empty({1, config_.num_heads, config_.head_dim, past_len}, config_.kv_dtype, kQNN);
+      auto k_upd1 = Tensor::empty({1, config_.num_heads, past_len, config_.head_dim}, config_.kv_dtype, kQNN);
       k_upd1.impl()->storage()->ptr_ = kv_decode_->getKCache()[l].buffer;
       k_upd1.impl()->storage()->mem_type_ = kManual;
       k_upd1.setName(updatedPastKeyName(l, "decode"));
@@ -352,7 +353,7 @@ void PDFusionRunner::init_decode_io() {
   const int32_t past_len = config_.context_len - 1;
 
   for (int l = 0; l < config_.num_layers; ++l) {
-    auto k = Tensor::empty({1, config_.num_heads, config_.head_dim, past_len}, config_.kv_dtype, kQNN);
+    auto k = Tensor::empty({1, config_.num_heads, past_len, config_.head_dim}, config_.kv_dtype, kQNN);
     k.impl()->storage()->ptr_ = k_decode[l].buffer;
     k.impl()->storage()->mem_type_ = kManual;
     k.setName("past_key_" + std::to_string(l));
@@ -391,7 +392,7 @@ void PDFusionRunner::init_decode_io() {
     // Updated single-slot caches.
     const int32_t past_len_upd = config_.context_len - 1;
     for (int l = 0; l < config_.num_layers; ++l) {
-      auto k_upd = Tensor::empty({1, config_.num_heads, config_.head_dim, past_len_upd}, config_.kv_dtype, kQNN);
+      auto k_upd = Tensor::empty({1, config_.num_heads, past_len_upd, config_.head_dim}, config_.kv_dtype, kQNN);
       k_upd.impl()->storage()->ptr_ = kv_decode_->getKCache()[l].buffer;
       k_upd.impl()->storage()->mem_type_ = kManual;
       k_upd.setName(updatedPastKeyName(l, ""));

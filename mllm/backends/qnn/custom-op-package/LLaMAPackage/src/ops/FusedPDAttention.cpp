@@ -31,6 +31,12 @@ BEGIN_PKG_OP_DEFINITION(PKG_FusedPDAttention);
 #define MLLM_FUSED_PD_ATTENTION_REF_MAX_SEQ 128
 #endif
 
+// Use 1-pass online softmax (running max + rescale) to avoid a 2nd K pass.
+// This is still a scalar reference kernel, but it reduces memory traffic significantly for long decode histories.
+#ifndef MLLM_FUSED_PD_ATTENTION_USE_ONLINE_SOFTMAX
+#define MLLM_FUSED_PD_ATTENTION_USE_ONLINE_SOFTMAX 1
+#endif
+
 // v1: decode-row streaming softmax reference (fixed-point, no expf).
 //
 // This is still NOT an optimized HVX kernel, but it avoids float+expf and avoids
@@ -41,6 +47,7 @@ constexpr int kBetaFracBits = 32;           // beta multiplier in Q0.32
 constexpr int kExpLutFracBits = 30;         // exp2 LUT output in Q2.30 (range [1,2))
 constexpr int kAlphaFracBits = 30;          // (v_scale/out_scale) in Q2.30-ish
 constexpr int32_t kMinDeltaLog2Q = -(32 << kScoreFracBits); // clamp exp2(delta) for delta <= -32
+constexpr int kMaxHeadDim = 256;            // scratch bound for reference kernels
 
 // 2^(i/256) in Q30 for i=0..255.
 static const uint32_t kExp2FracLutQ30[256] = {
@@ -82,6 +89,22 @@ static inline int64_t div_round_nearest_i64(int64_t num, int64_t den) {
   if (den == 0) return 0;
   if (num >= 0) return (num + den / 2) / den;
   return (num - den / 2) / den;
+}
+
+// Compute (x * m_q30) >> 30 without 128-bit intermediates.
+// m_q30 is unsigned Q30 in [0, 1<<30]. Truncates toward zero for negative x.
+//
+// Dynamic range note: in this kernel, |x| stays well below 2^63 because:
+// - sum_exp_q30 <= (past_len + seq_len) * (1<<30)
+// - out_num_q30 <= sum_exp_q30 * max(|v_delta|)
+static inline int64_t mul_q30_trunc_i64(int64_t x, uint32_t m_q30) {
+  if (m_q30 == 0 || x == 0) return 0;
+  const uint64_t ax = (x < 0) ? (uint64_t)(-(uint64_t)x) : (uint64_t)x;
+  const uint64_t lo = (uint32_t)(ax & 0xFFFFFFFFu);
+  const uint64_t hi = ax >> 32;
+  // (hi<<32 + lo) * m >> 30 = (hi*m)<<(32-30) + (lo*m)>>30 = (hi*m)<<2 + (lo*m)>>30
+  const uint64_t res = ((hi * (uint64_t)m_q30) << 2) + ((lo * (uint64_t)m_q30) >> 30);
+  return (x < 0) ? -(int64_t)res : (int64_t)res;
 }
 
 // exp2(delta) for delta<=0 in log2 domain, where delta is Q(kScoreFracBits).
@@ -163,9 +186,10 @@ GraphStatus fusedPDAttentionImpl(TensorType& out_attn,
   auto [b_q, h_attn, s_q, d_q] = q.dims();  // [B, H_attn, S, D]
   auto [b_k, h_kv, d_k, s_k] = k_curr.dims();  // [B, H_kv, D, S]
   auto [b_v, h_v, s_v, d_v] = v_curr.dims();  // [B, H_kv, S, D]
-  auto [b_pk0, h_pk0, d_pk0, past_len0] = past_k_prefill.dims();  // [B, H_kv, D, past_len]
+  // K cache is token-major: [B, H_kv, past_len, D]
+  auto [b_pk0, h_pk0, past_len0, d_pk0] = past_k_prefill.dims();
   auto [b_pv0, h_pv0, past_lenv0, d_pv0] = past_v_prefill.dims(); // [B, H_kv, past_len, D]
-  auto [b_pk1, h_pk1, d_pk1, past_len1] = past_k_decode.dims();
+  auto [b_pk1, h_pk1, past_len1, d_pk1] = past_k_decode.dims();
   auto [b_pv1, h_pv1, past_lenv1, d_pv1] = past_v_decode.dims();
 
   if (b_q != b_k || b_q != b_v) { return GraphStatus::Success; }
@@ -183,6 +207,7 @@ GraphStatus fusedPDAttentionImpl(TensorType& out_attn,
   const int32_t head_dim = static_cast<int32_t>(d_q);
   const int32_t ctx_len = past_len + seq_len;
   if (seq_len <= 0 || head_dim <= 0 || ctx_len <= 0) { return GraphStatus::Success; }
+  if (head_dim > kMaxHeadDim) { return GraphStatus::Success; }
 
   // Scalars
   const float q_scale_f = static_cast<float>(q_scale(0, 0, 0, 0));
@@ -255,11 +280,11 @@ GraphStatus fusedPDAttentionImpl(TensorType& out_attn,
   };
   auto out_off = q_off;
 
-  // k cache: [B,H_kv,D,Len]
+  // k cache: [B,H_kv,Len,D] (token-major)
   auto kcache_off = [&](int32_t b, int32_t hk, int32_t d, int32_t t, int32_t len) -> size_t {
-    return (((size_t)b * (size_t)h_kv + (size_t)hk) * (size_t)head_dim + (size_t)d) * (size_t)len + (size_t)t;
+    return (((size_t)b * (size_t)h_kv + (size_t)hk) * (size_t)len + (size_t)t) * (size_t)head_dim + (size_t)d;
   };
-  // v cache: [B,H_kv,Len,D]
+  // v cache: [B,H_kv,Len,D] (token-major)
   auto vcache_off = [&](int32_t b, int32_t hk, int32_t t, int32_t d, int32_t len) -> size_t {
     return (((size_t)b * (size_t)h_kv + (size_t)hk) * (size_t)len + (size_t)t) * (size_t)head_dim + (size_t)d;
   };
@@ -286,27 +311,16 @@ GraphStatus fusedPDAttentionImpl(TensorType& out_attn,
   if (beta_q32 == 0) beta_q32 = (beta >= 0.0) ? 1 : -1;
   const int64_t alpha_q30 = (int64_t)llround(((double)v_scale_f / (double)out_scale_f) * (double)(1ULL << kAlphaFracBits));
 
-  // Shared scratch (small, reused across heads and rows).
-  int32_t* decode_qd = nullptr;
-  int64_t* decode_out_num = nullptr;
-  auto decode_scratch_ok = [&]() -> bool { return decode_qd && decode_out_num; };
-
-  if (prefill_active || decode_active) {
-    decode_qd = (int32_t*)malloc((size_t)head_dim * sizeof(int32_t));
-    decode_out_num = (int64_t*)malloc((size_t)head_dim * sizeof(int64_t));
-    if (!decode_scratch_ok()) {
-      if (decode_qd) free(decode_qd);
-      if (decode_out_num) free(decode_out_num);
-      return GraphStatus::Success;
-    }
-  }
+  // Shared scratch (small, reused across heads and rows). Avoid heap allocs in the hot path.
+  int32_t decode_qd_buf[kMaxHeadDim];
+  int64_t decode_out_num_buf[kMaxHeadDim];
+  int32_t* decode_qd = decode_qd_buf;
+  int64_t* decode_out_num = decode_out_num_buf;
 
   auto run_streaming_row = [&](int32_t b, int32_t h, int32_t row, bool is_decode_row, int32_t n_past,
                                int32_t curr_begin, int32_t curr_end) {
     const int32_t hk = h / groups;
     if (hk < 0 || hk >= (int32_t)h_kv) { return; }
-
-    if (!decode_scratch_ok()) { return; }
 
     // q deltas (centered).
     for (int32_t d = 0; d < head_dim; ++d) {
@@ -318,7 +332,6 @@ GraphStatus fusedPDAttentionImpl(TensorType& out_attn,
     int32_t se = curr_end;
     if (sb < 0) sb = 0;
     if (se >= seq_len) se = seq_len - 1;
-    const int32_t Lcurr = (sb <= se) ? (se - sb + 1) : 0;
 
     // Pass 1: find max score (log2 domain, QkScoreFracBits).
     int32_t max_score_q = std::numeric_limits<int32_t>::min();
@@ -330,6 +343,87 @@ GraphStatus fusedPDAttentionImpl(TensorType& out_attn,
       if (shifted < (int64_t)std::numeric_limits<int32_t>::min()) return std::numeric_limits<int32_t>::min();
       return (int32_t)shifted;
     };
+
+#if MLLM_FUSED_PD_ATTENTION_USE_ONLINE_SOFTMAX
+    // Online 1-pass streaming softmax: reads each K/V once, rescales when max increases.
+    std::memset(decode_out_num, 0, (size_t)head_dim * sizeof(int64_t));
+    int64_t sum_exp_q30 = 0;
+
+    auto ingest = [&](int32_t score_q, auto&& v_getter) {
+      if (max_score_q == std::numeric_limits<int32_t>::min()) {
+        max_score_q = score_q;
+        sum_exp_q30 = (1LL << kExpLutFracBits);
+        for (int32_t d = 0; d < head_dim; ++d) {
+          const int32_t v_u = (int32_t)v_getter(d);
+          decode_out_num[d] = (int64_t)(1LL << kExpLutFracBits) * (int64_t)(v_u - v_zp_i);
+        }
+        return;
+      }
+
+      if (score_q > max_score_q) {
+        int32_t delta_q = max_score_q - score_q; // <= 0
+        if (delta_q < kMinDeltaLog2Q) delta_q = kMinDeltaLog2Q;
+        const uint32_t scale_q30 = exp2_neg_log2_q_to_q30(delta_q);
+        sum_exp_q30 = mul_q30_trunc_i64(sum_exp_q30, scale_q30);
+        for (int32_t d = 0; d < head_dim; ++d) decode_out_num[d] = mul_q30_trunc_i64(decode_out_num[d], scale_q30);
+        max_score_q = score_q;
+
+        // Add current element with weight=1.
+        sum_exp_q30 += (1LL << kExpLutFracBits);
+        for (int32_t d = 0; d < head_dim; ++d) {
+          const int32_t v_u = (int32_t)v_getter(d);
+          decode_out_num[d] += (int64_t)(1LL << kExpLutFracBits) * (int64_t)(v_u - v_zp_i);
+        }
+        return;
+      }
+
+      int32_t delta_q = score_q - max_score_q; // <= 0
+      if (delta_q < kMinDeltaLog2Q) return;
+      const uint32_t w_q30 = exp2_neg_log2_q_to_q30(delta_q);
+      if (w_q30 == 0) return;
+      sum_exp_q30 += (int64_t)w_q30;
+      for (int32_t d = 0; d < head_dim; ++d) {
+        const int32_t v_u = (int32_t)v_getter(d);
+        decode_out_num[d] += (int64_t)w_q30 * (int64_t)(v_u - v_zp_i);
+      }
+    };
+
+    for (int32_t t = 0; t < Lpast; ++t) {
+      int64_t dot = 0;
+      for (int32_t d = 0; d < head_dim; ++d) {
+        const int32_t k_u = (int32_t)(is_decode_row ? pk1_ptr[kcache_off(b, hk, d, t, past_len)]
+                                                   : pk0_ptr[kcache_off(b, hk, d, t, past_len)]);
+        dot += (int64_t)decode_qd[d] * (int64_t)(k_u - k_zp_i);
+      }
+      const int32_t score_q = score_q_from_dot(dot);
+      ingest(score_q, [&](int32_t d) -> uint8_t {
+        return is_decode_row ? pv1_ptr[vcache_off(b, hk, t, d, past_len)] : pv0_ptr[vcache_off(b, hk, t, d, past_len)];
+      });
+    }
+    for (int32_t s = sb; s <= se; ++s) {
+      int64_t dot = 0;
+      for (int32_t d = 0; d < head_dim; ++d) {
+        const int32_t k_u = (int32_t)k_curr_ptr[kcurr_off(b, hk, d, s)];
+        dot += (int64_t)decode_qd[d] * (int64_t)(k_u - k_zp_i);
+      }
+      const int32_t score_q = score_q_from_dot(dot);
+      ingest(score_q, [&](int32_t d) -> uint8_t { return v_curr_ptr[vcurr_off(b, hk, s, d)]; });
+    }
+
+    if (sum_exp_q30 <= 0) return;
+
+    for (int32_t d = 0; d < head_dim; ++d) {
+      const int64_t avg_v_delta = div_round_nearest_i64(decode_out_num[d], sum_exp_q30); // roughly [-128,127]
+      const int64_t scaled = avg_v_delta * alpha_q30;
+      int64_t out_delta = (scaled >= 0) ? ((scaled + (1LL << (kAlphaFracBits - 1))) >> kAlphaFracBits)
+                                        : ((scaled - (1LL << (kAlphaFracBits - 1))) >> kAlphaFracBits);
+      int64_t out_u = (int64_t)out_zp_i + out_delta;
+      if (out_u < 0) out_u = 0;
+      if (out_u > 65535) out_u = 65535;
+      out_ptr[out_off(b, h, row, d)] = (uint16_t)out_u;
+    }
+    return;
+#endif
 
     // past positions
     for (int32_t t = 0; t < Lpast; ++t) {
@@ -435,8 +529,6 @@ GraphStatus fusedPDAttentionImpl(TensorType& out_attn,
     }
   }
 
-  if (decode_qd) free(decode_qd);
-  if (decode_out_num) free(decode_out_num);
   return GraphStatus::Success;
 }
 
@@ -471,7 +563,7 @@ GraphStatus fusedPDAttentionK4Impl(TensorType& out_attn,
                                    const TensorType& past_v_dec2,
                                    const TensorType& past_k_dec3,
                                    const TensorType& past_v_dec3,
-                                   const TensorType& attention_mask,
+                                   const TensorType& /*attention_mask*/,
                                    const TensorType& fusion_ctrl,
                                    const TensorType& decode_past_lens,
                                    const TensorType& q_scale,
@@ -521,15 +613,15 @@ GraphStatus fusedPDAttentionK4Impl(TensorType& out_attn,
   auto [b_q, h_attn, s_q, d_q] = q.dims();               // [B, H_attn, S, D]
   auto [b_k, h_kv, d_k, s_k] = k_curr.dims();            // [B, H_kv, D, S]
   auto [b_v, h_v, s_v, d_v] = v_curr.dims();             // [B, H_kv, S, D]
-  auto [b_pk0, h_pk0, d_pk0, past_len0] = past_k_prefill.dims();
+  auto [b_pk0, h_pk0, past_len0, d_pk0] = past_k_prefill.dims();
   auto [b_pv0, h_pv0, past_lenv0, d_pv0] = past_v_prefill.dims();
-  auto [b_pk1, h_pk1, d_pk1, past_len1] = past_k_dec0.dims();
+  auto [b_pk1, h_pk1, past_len1, d_pk1] = past_k_dec0.dims();
   auto [b_pv1, h_pv1, past_lenv1, d_pv1] = past_v_dec0.dims();
-  auto [b_pk2, h_pk2, d_pk2, past_len2] = past_k_dec1.dims();
+  auto [b_pk2, h_pk2, past_len2, d_pk2] = past_k_dec1.dims();
   auto [b_pv2, h_pv2, past_lenv2, d_pv2] = past_v_dec1.dims();
-  auto [b_pk3, h_pk3, d_pk3, past_len3] = past_k_dec2.dims();
+  auto [b_pk3, h_pk3, past_len3, d_pk3] = past_k_dec2.dims();
   auto [b_pv3, h_pv3, past_lenv3, d_pv3] = past_v_dec2.dims();
-  auto [b_pk4, h_pk4, d_pk4, past_len4] = past_k_dec3.dims();
+  auto [b_pk4, h_pk4, past_len4, d_pk4] = past_k_dec3.dims();
   auto [b_pv4, h_pv4, past_lenv4, d_pv4] = past_v_dec3.dims();
 
   if (b_q != b_k || b_q != b_v) { return GraphStatus::Success; }
@@ -553,6 +645,7 @@ GraphStatus fusedPDAttentionK4Impl(TensorType& out_attn,
   const int32_t head_dim = (int32_t)d_q;
   const int32_t past_len = (int32_t)past_len0;
   if (seq_len < 4) { return GraphStatus::Success; }
+  if (head_dim > kMaxHeadDim) { return GraphStatus::Success; }
 
   const float q_scale_f = static_cast<float>(q_scale(0, 0, 0, 0));
   const int32_t q_zp_i = static_cast<int32_t>(q_zp(0, 0, 0, 0));
@@ -622,7 +715,7 @@ GraphStatus fusedPDAttentionK4Impl(TensorType& out_attn,
   };
   auto out_off = q_off;
   auto kcache_off = [&](int32_t b, int32_t hk, int32_t d, int32_t t, int32_t len) -> size_t {
-    return (((size_t)b * (size_t)h_kv + (size_t)hk) * (size_t)head_dim + (size_t)d) * (size_t)len + (size_t)t;
+    return (((size_t)b * (size_t)h_kv + (size_t)hk) * (size_t)len + (size_t)t) * (size_t)head_dim + (size_t)d;
   };
   auto vcache_off = [&](int32_t b, int32_t hk, int32_t t, int32_t d, int32_t len) -> size_t {
     return (((size_t)b * (size_t)h_kv + (size_t)hk) * (size_t)len + (size_t)t) * (size_t)head_dim + (size_t)d;
@@ -641,17 +734,11 @@ GraphStatus fusedPDAttentionK4Impl(TensorType& out_attn,
   if (beta_q32 == 0) beta_q32 = (beta >= 0.0) ? 1 : -1;
   const int64_t alpha_q30 = (int64_t)llround(((double)v_scale_f / (double)out_scale_f) * (double)(1ULL << kAlphaFracBits));
 
-  int32_t* qd = nullptr;
-  int64_t* out_num = nullptr;
-  if (prefill_active || decode_active) {
-    qd = (int32_t*)malloc((size_t)head_dim * sizeof(int32_t));
-    out_num = (int64_t*)malloc((size_t)head_dim * sizeof(int64_t));
-    if (!qd || !out_num) {
-      if (qd) free(qd);
-      if (out_num) free(out_num);
-      return GraphStatus::Success;
-    }
-  }
+  // Shared scratch (small, reused across heads and rows). Avoid heap allocs in the hot path.
+  int32_t qd_buf[kMaxHeadDim];
+  int64_t out_num_buf[kMaxHeadDim];
+  int32_t* qd = qd_buf;
+  int64_t* out_num = out_num_buf;
 
   auto score_q_from_dot = [&](int64_t dot_i64) -> int32_t {
     const int64_t prod = dot_i64 * beta_q32;
@@ -665,7 +752,6 @@ GraphStatus fusedPDAttentionK4Impl(TensorType& out_attn,
                      int32_t curr_end) {
     const int32_t hk = h / groups;
     if (hk < 0 || hk >= (int32_t)h_kv) return;
-    if (!qd || !out_num) return;
     int32_t Lpast = std::min(std::max(n_past, 0), past_len);
     int32_t sb = curr_begin;
     int32_t se = curr_end;
@@ -674,6 +760,63 @@ GraphStatus fusedPDAttentionK4Impl(TensorType& out_attn,
     if (se < sb) { sb = 1; se = 0; } // empty
 
     for (int32_t d = 0; d < head_dim; ++d) qd[d] = (int32_t)q_ptr[q_off(b, h, row, d)] - q_zp_i;
+
+#if MLLM_FUSED_PD_ATTENTION_USE_ONLINE_SOFTMAX
+    // Online 1-pass streaming softmax: reads each K/V once, rescales when max increases.
+    int32_t max_score_q = std::numeric_limits<int32_t>::min();
+    int64_t sum_exp_q30 = 0;
+    std::memset(out_num, 0, (size_t)head_dim * sizeof(int64_t));
+
+    auto ingest = [&](int32_t score_q, auto&& v_getter) {
+      if (max_score_q == std::numeric_limits<int32_t>::min()) {
+        max_score_q = score_q;
+        sum_exp_q30 = (1LL << kExpLutFracBits);
+        for (int32_t d = 0; d < head_dim; ++d) out_num[d] = (int64_t)(1LL << kExpLutFracBits) * (int64_t)((int32_t)v_getter(d) - v_zp_i);
+        return;
+      }
+      if (score_q > max_score_q) {
+        int32_t delta_q = max_score_q - score_q;
+        if (delta_q < kMinDeltaLog2Q) delta_q = kMinDeltaLog2Q;
+        const uint32_t scale_q30 = exp2_neg_log2_q_to_q30(delta_q);
+        sum_exp_q30 = mul_q30_trunc_i64(sum_exp_q30, scale_q30);
+        for (int32_t d = 0; d < head_dim; ++d) out_num[d] = mul_q30_trunc_i64(out_num[d], scale_q30);
+        max_score_q = score_q;
+        sum_exp_q30 += (1LL << kExpLutFracBits);
+        for (int32_t d = 0; d < head_dim; ++d) out_num[d] += (int64_t)(1LL << kExpLutFracBits) * (int64_t)((int32_t)v_getter(d) - v_zp_i);
+        return;
+      }
+      int32_t delta_q = score_q - max_score_q;
+      if (delta_q < kMinDeltaLog2Q) return;
+      const uint32_t w_q30 = exp2_neg_log2_q_to_q30(delta_q);
+      if (w_q30 == 0) return;
+      sum_exp_q30 += (int64_t)w_q30;
+      for (int32_t d = 0; d < head_dim; ++d) out_num[d] += (int64_t)w_q30 * (int64_t)((int32_t)v_getter(d) - v_zp_i);
+    };
+
+    for (int32_t t = 0; t < Lpast; ++t) {
+      int64_t dot = 0;
+      for (int32_t d = 0; d < head_dim; ++d) dot += (int64_t)qd[d] * (int64_t)((int32_t)pk[kcache_off(b, hk, d, t, past_len)] - k_zp_i);
+      ingest(score_q_from_dot(dot), [&](int32_t d) -> uint8_t { return pv[vcache_off(b, hk, t, d, past_len)]; });
+    }
+    for (int32_t s = sb; s <= se; ++s) {
+      int64_t dot = 0;
+      for (int32_t d = 0; d < head_dim; ++d) dot += (int64_t)qd[d] * (int64_t)((int32_t)k_curr_ptr[kcurr_off(b, hk, d, s)] - k_zp_i);
+      ingest(score_q_from_dot(dot), [&](int32_t d) -> uint8_t { return v_curr_ptr[vcurr_off(b, hk, s, d)]; });
+    }
+    if (sum_exp_q30 <= 0) return;
+
+    for (int32_t d = 0; d < head_dim; ++d) {
+      const int64_t avg_v_delta = div_round_nearest_i64(out_num[d], sum_exp_q30);
+      const int64_t scaled = avg_v_delta * alpha_q30;
+      int64_t out_delta = (scaled >= 0) ? ((scaled + (1LL << (kAlphaFracBits - 1))) >> kAlphaFracBits)
+                                        : ((scaled - (1LL << (kAlphaFracBits - 1))) >> kAlphaFracBits);
+      int64_t out_u = (int64_t)out_zp_i + out_delta;
+      if (out_u < 0) out_u = 0;
+      if (out_u > 65535) out_u = 65535;
+      out_ptr[out_off(b, h, row, d)] = (uint16_t)out_u;
+    }
+    return;
+#endif
 
     int32_t max_score_q = std::numeric_limits<int32_t>::min();
     for (int32_t t = 0; t < Lpast; ++t) {
@@ -748,8 +891,6 @@ GraphStatus fusedPDAttentionK4Impl(TensorType& out_attn,
     }
   }
 
-  if (qd) free(qd);
-  if (out_num) free(out_num);
   return GraphStatus::Success;
 }
 
