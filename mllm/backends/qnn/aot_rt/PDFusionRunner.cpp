@@ -498,7 +498,13 @@ void PDFusionRunner::prepare_io(PDGraphIO& g, const PrefillSlot& prefill, const 
   //   [past_len .. past_len+total_len-1] -> current tokens (packed prefill+decode)
   constexpr uint16_t kMasked = 0;
   constexpr uint16_t kAllowed = 65535;
-  std::fill_n(attn_mask_ptr, total_len * context_len, kMasked);
+  // P1-1: avoid rewriting the entire [N * context_len] mask every step.
+  // Only rows that are actually consumed this step need correct masking; unused rows can remain stale
+  // because they never contribute to KV updates nor logits sampling after right-aligned packing.
+  if (!g.mask_initialized) {
+    std::fill_n(attn_mask_ptr, total_len * context_len, kMasked);
+    g.mask_initialized = true;
+  }
 
   auto clampPast = [&](int64_t n_past) -> int32_t {
     if (n_past <= 0) return 0;
@@ -516,6 +522,7 @@ void PDFusionRunner::prepare_io(PDGraphIO& g, const PrefillSlot& prefill, const 
       const int32_t r = base + t;
       if (r < 0 || r >= decode_idx) continue;
       uint16_t* row = attn_mask_ptr + r * context_len;
+      std::fill_n(row, context_len, kMasked);
       std::fill_n(row, n_past0, kAllowed);
       for (int32_t j = base; j <= r; ++j) { row[past_len + j] = kAllowed; }
     }
@@ -525,6 +532,7 @@ void PDFusionRunner::prepare_io(PDGraphIO& g, const PrefillSlot& prefill, const 
   if (decode.active) {
     const int32_t n_past1 = clampPast(decode.start_pos);
     uint16_t* row = attn_mask_ptr + decode_idx * context_len;
+    std::fill_n(row, context_len, kMasked);
     std::fill_n(row, n_past1, kAllowed);
     row[past_len + decode_idx] = kAllowed;
   }

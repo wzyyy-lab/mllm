@@ -1414,6 +1414,129 @@ Confidential and Proprietary - Qualcomm Technologies, Inc.
         </OpDef>
 
         <OpDef>
+            <Name>FusedPDAttentionK4</Name>
+            <Description>
+                <Content>
+                    PD-fusion attention (k=4 decode rows). Prefill rows are right-aligned before the decode block.
+                    This op does not read attention_mask; visibility is reconstructed from fusion_ctrl + decode_past_lens.
+                </Content>
+            </Description>
+
+            <Input>
+                <Name>q</Name>
+                <Mandatory>true</Mandatory>
+                <Datatype>BACKEND_SPECIFIC</Datatype>
+                <Shape>
+                    <Rank>4D</Rank>
+                    <Layout>NHWC</Layout>
+                    <Text>[N, C, H , W]</Text>
+                </Shape>
+            </Input>
+            <Input>
+                <Name>k_curr</Name>
+                <Mandatory>true</Mandatory>
+                <Datatype>BACKEND_SPECIFIC</Datatype>
+                <Shape>
+                    <Rank>4D</Rank>
+                    <Layout>NHWC</Layout>
+                    <Text>[N, C, H , W]</Text>
+                </Shape>
+            </Input>
+            <Input>
+                <Name>v_curr</Name>
+                <Mandatory>true</Mandatory>
+                <Datatype>BACKEND_SPECIFIC</Datatype>
+                <Shape>
+                    <Rank>4D</Rank>
+                    <Layout>NHWC</Layout>
+                    <Text>[N, C, H , W]</Text>
+                </Shape>
+            </Input>
+
+            <Input>
+                <Name>past_k_prefill</Name>
+                <Mandatory>true</Mandatory>
+                <Datatype>BACKEND_SPECIFIC</Datatype>
+                <Shape>
+                    <Rank>4D</Rank>
+                    <Layout>NHWC</Layout>
+                    <Text>[N, C, H , W]</Text>
+                </Shape>
+            </Input>
+            <Input>
+                <Name>past_v_prefill</Name>
+                <Mandatory>true</Mandatory>
+                <Datatype>BACKEND_SPECIFIC</Datatype>
+                <Shape>
+                    <Rank>4D</Rank>
+                    <Layout>NHWC</Layout>
+                    <Text>[N, C, H , W]</Text>
+                </Shape>
+            </Input>
+
+            <Input><Name>past_k_dec0</Name><Mandatory>true</Mandatory><Datatype>BACKEND_SPECIFIC</Datatype><Shape><Rank>4D</Rank><Layout>NHWC</Layout><Text>[N, C, H , W]</Text></Shape></Input>
+            <Input><Name>past_v_dec0</Name><Mandatory>true</Mandatory><Datatype>BACKEND_SPECIFIC</Datatype><Shape><Rank>4D</Rank><Layout>NHWC</Layout><Text>[N, C, H , W]</Text></Shape></Input>
+            <Input><Name>past_k_dec1</Name><Mandatory>true</Mandatory><Datatype>BACKEND_SPECIFIC</Datatype><Shape><Rank>4D</Rank><Layout>NHWC</Layout><Text>[N, C, H , W]</Text></Shape></Input>
+            <Input><Name>past_v_dec1</Name><Mandatory>true</Mandatory><Datatype>BACKEND_SPECIFIC</Datatype><Shape><Rank>4D</Rank><Layout>NHWC</Layout><Text>[N, C, H , W]</Text></Shape></Input>
+            <Input><Name>past_k_dec2</Name><Mandatory>true</Mandatory><Datatype>BACKEND_SPECIFIC</Datatype><Shape><Rank>4D</Rank><Layout>NHWC</Layout><Text>[N, C, H , W]</Text></Shape></Input>
+            <Input><Name>past_v_dec2</Name><Mandatory>true</Mandatory><Datatype>BACKEND_SPECIFIC</Datatype><Shape><Rank>4D</Rank><Layout>NHWC</Layout><Text>[N, C, H , W]</Text></Shape></Input>
+            <Input><Name>past_k_dec3</Name><Mandatory>true</Mandatory><Datatype>BACKEND_SPECIFIC</Datatype><Shape><Rank>4D</Rank><Layout>NHWC</Layout><Text>[N, C, H , W]</Text></Shape></Input>
+            <Input><Name>past_v_dec3</Name><Mandatory>true</Mandatory><Datatype>BACKEND_SPECIFIC</Datatype><Shape><Rank>4D</Rank><Layout>NHWC</Layout><Text>[N, C, H , W]</Text></Shape></Input>
+
+            <Input>
+                <Name>attention_mask</Name>
+                <Mandatory>true</Mandatory>
+                <Datatype>BACKEND_SPECIFIC</Datatype>
+                <Shape>
+                    <Rank>4D</Rank>
+                    <Layout>NHWC</Layout>
+                    <Text>[N, C, H , W]</Text>
+                </Shape>
+            </Input>
+
+            <Input>
+                <Name>fusion_ctrl</Name>
+                <Mandatory>true</Mandatory>
+                <Datatype>BACKEND_SPECIFIC</Datatype>
+                <Shape>
+                    <Rank>1D</Rank>
+                    <Text>[6]</Text>
+                </Shape>
+            </Input>
+
+            <Input>
+                <Name>decode_past_lens</Name>
+                <Mandatory>true</Mandatory>
+                <Datatype>BACKEND_SPECIFIC</Datatype>
+                <Shape>
+                    <Rank>1D</Rank>
+                    <Text>[4]</Text>
+                </Shape>
+            </Input>
+
+            <Input><Name>q_scale</Name><Mandatory>true</Mandatory><Datatype>BACKEND_SPECIFIC</Datatype><Shape><Rank>SCALAR</Rank></Shape></Input>
+            <Input><Name>q_zp</Name><Mandatory>true</Mandatory><Datatype>BACKEND_SPECIFIC</Datatype><Shape><Rank>SCALAR</Rank></Shape></Input>
+            <Input><Name>k_scale</Name><Mandatory>true</Mandatory><Datatype>BACKEND_SPECIFIC</Datatype><Shape><Rank>SCALAR</Rank></Shape></Input>
+            <Input><Name>k_zp</Name><Mandatory>true</Mandatory><Datatype>BACKEND_SPECIFIC</Datatype><Shape><Rank>SCALAR</Rank></Shape></Input>
+            <Input><Name>v_scale</Name><Mandatory>true</Mandatory><Datatype>BACKEND_SPECIFIC</Datatype><Shape><Rank>SCALAR</Rank></Shape></Input>
+            <Input><Name>v_zp</Name><Mandatory>true</Mandatory><Datatype>BACKEND_SPECIFIC</Datatype><Shape><Rank>SCALAR</Rank></Shape></Input>
+            <Input><Name>out_scale</Name><Mandatory>true</Mandatory><Datatype>BACKEND_SPECIFIC</Datatype><Shape><Rank>SCALAR</Rank></Shape></Input>
+            <Input><Name>out_zp</Name><Mandatory>true</Mandatory><Datatype>BACKEND_SPECIFIC</Datatype><Shape><Rank>SCALAR</Rank></Shape></Input>
+
+            <Output>
+                <Name>out_attn</Name>
+                <Mandatory>true</Mandatory>
+                <Datatype>BACKEND_SPECIFIC</Datatype>
+                <Shape>
+                    <Rank>4D</Rank>
+                    <Text> [N, C, H , W] </Text>
+                </Shape>
+            </Output>
+
+            <SupportedBackend>HTP</SupportedBackend>
+        </OpDef>
+
+        <OpDef>
             <Name>WNop</Name>
             <Description>
                 <Content>
@@ -1700,7 +1823,47 @@ Confidential and Proprietary - Qualcomm Technologies, Inc.
                 <Datatype>QNN_DATATYPE_FLOAT_16</Datatype>
                 <Datatype>QNN_DATATYPE_UFIXED_POINT_16</Datatype>
             </Output>
-        </SupplementalOpDef>
+          </SupplementalOpDef>
+
+          <!--FusedPDAttentionK4-->
+          <SupplementalOpDef>
+              <Name>FusedPDAttentionK4</Name>
+
+              <Input>
+                  <Name>q</Name>
+                  <Datatype>QNN_DATATYPE_FLOAT_16</Datatype>
+                  <Datatype>QNN_DATATYPE_UFIXED_POINT_16</Datatype>
+              </Input>
+              <Input><Name>k_curr</Name><Datatype>QNN_DATATYPE_UFIXED_POINT_8</Datatype></Input>
+              <Input><Name>v_curr</Name><Datatype>QNN_DATATYPE_UFIXED_POINT_8</Datatype></Input>
+              <Input><Name>past_k_prefill</Name><Datatype>QNN_DATATYPE_UFIXED_POINT_8</Datatype></Input>
+              <Input><Name>past_v_prefill</Name><Datatype>QNN_DATATYPE_UFIXED_POINT_8</Datatype></Input>
+              <Input><Name>past_k_dec0</Name><Datatype>QNN_DATATYPE_UFIXED_POINT_8</Datatype></Input>
+              <Input><Name>past_v_dec0</Name><Datatype>QNN_DATATYPE_UFIXED_POINT_8</Datatype></Input>
+              <Input><Name>past_k_dec1</Name><Datatype>QNN_DATATYPE_UFIXED_POINT_8</Datatype></Input>
+              <Input><Name>past_v_dec1</Name><Datatype>QNN_DATATYPE_UFIXED_POINT_8</Datatype></Input>
+              <Input><Name>past_k_dec2</Name><Datatype>QNN_DATATYPE_UFIXED_POINT_8</Datatype></Input>
+              <Input><Name>past_v_dec2</Name><Datatype>QNN_DATATYPE_UFIXED_POINT_8</Datatype></Input>
+              <Input><Name>past_k_dec3</Name><Datatype>QNN_DATATYPE_UFIXED_POINT_8</Datatype></Input>
+              <Input><Name>past_v_dec3</Name><Datatype>QNN_DATATYPE_UFIXED_POINT_8</Datatype></Input>
+              <Input><Name>attention_mask</Name><Datatype>QNN_DATATYPE_UFIXED_POINT_16</Datatype></Input>
+              <Input><Name>fusion_ctrl</Name><Datatype>QNN_DATATYPE_INT_32</Datatype></Input>
+              <Input><Name>decode_past_lens</Name><Datatype>QNN_DATATYPE_INT_32</Datatype></Input>
+              <Input><Name>q_scale</Name><Datatype>QNN_DATATYPE_FLOAT_32</Datatype></Input>
+              <Input><Name>q_zp</Name><Datatype>QNN_DATATYPE_INT_32</Datatype></Input>
+              <Input><Name>k_scale</Name><Datatype>QNN_DATATYPE_FLOAT_32</Datatype></Input>
+              <Input><Name>k_zp</Name><Datatype>QNN_DATATYPE_INT_32</Datatype></Input>
+              <Input><Name>v_scale</Name><Datatype>QNN_DATATYPE_FLOAT_32</Datatype></Input>
+              <Input><Name>v_zp</Name><Datatype>QNN_DATATYPE_INT_32</Datatype></Input>
+              <Input><Name>out_scale</Name><Datatype>QNN_DATATYPE_FLOAT_32</Datatype></Input>
+              <Input><Name>out_zp</Name><Datatype>QNN_DATATYPE_INT_32</Datatype></Input>
+
+              <Output>
+                  <Name>out_attn</Name>
+                  <Datatype>QNN_DATATYPE_FLOAT_16</Datatype>
+                  <Datatype>QNN_DATATYPE_UFIXED_POINT_16</Datatype>
+              </Output>
+          </SupplementalOpDef>
 
 
         <!--QLayerNorm-->

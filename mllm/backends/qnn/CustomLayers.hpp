@@ -17,6 +17,7 @@ struct DequantizeAddOpOptions : public BaseOpOptions<DequantizeAddOpOptions> {
 
 struct PDKVCacheUpdateOpOptions : public BaseOpOptions<PDKVCacheUpdateOpOptions> {};
 struct FusedPDAttentionOpOptions : public BaseOpOptions<FusedPDAttentionOpOptions> {};
+struct FusedPDAttentionK4OpOptions : public BaseOpOptions<FusedPDAttentionK4OpOptions> {};
 
 /**
  * @brief QNN Custom Layer: DequantizeAdd
@@ -72,6 +73,28 @@ class PDKVCacheUpdate : public Layer {
 class FusedPDAttention : public Layer {
  public:
   FusedPDAttention();
+
+  MLLM_LAYER_ANY_INPUTS_1_OUTPUTS_FORWARD
+};
+
+/**
+ * @brief QNN Custom Layer: FusedPDAttentionK4
+ *
+ * Kernel C v3 variant for PD-k graphs (k=4 decode rows).
+ *
+ * Expected inputs:
+ *   q, k_curr, v_curr,
+ *   past_k_prefill, past_v_prefill,
+ *   past_k_dec0, past_v_dec0, past_k_dec1, past_v_dec1, past_k_dec2, past_v_dec2, past_k_dec3, past_v_dec3,
+ *   attention_mask, fusion_ctrl, decode_past_lens,
+ *   q_scale, q_zp, k_scale, k_zp, v_scale, v_zp, out_scale, out_zp
+ *
+ * Outputs:
+ *   attn_out  (same shape/dtype as q)
+ */
+class FusedPDAttentionK4 : public Layer {
+ public:
+  FusedPDAttentionK4();
 
   MLLM_LAYER_ANY_INPUTS_1_OUTPUTS_FORWARD
 };
@@ -165,6 +188,35 @@ class FusedPDAttentionFactory final
  public:
   inline std::shared_ptr<mllm::BaseOp> createOpImpl(const nn::qnn::FusedPDAttentionOpOptions& cargo) override {
     auto p = std::make_shared<FusedPDAttentionOp>(cargo);
+    p->setOpType(opType());
+    return p;
+  }
+};
+
+class FusedPDAttentionK4Op final : public mllm::plugin::interface::CustomizedOp {
+ public:
+  explicit FusedPDAttentionK4Op(const nn::qnn::FusedPDAttentionK4OpOptions& options)
+      : CustomizedOp("FusedPDAttentionK4"), options_(options) {}
+
+  void load(const mllm::ParameterFile::ptr_t& /*ploader*/) override {}
+
+  void trace(void* trace_context, const std::vector<mllm::Tensor>& inputs, std::vector<mllm::Tensor>& outputs) override;
+
+  void forward(const std::vector<mllm::Tensor>& /*inputs*/, std::vector<mllm::Tensor>& /*outputs*/) override {}
+
+  void reshape(const std::vector<mllm::Tensor>& inputs, std::vector<mllm::Tensor>& outputs) override;
+
+  void setup(const std::vector<mllm::Tensor>& /*inputs*/, std::vector<mllm::Tensor>& /*outputs*/) override {}
+
+ protected:
+  nn::qnn::FusedPDAttentionK4OpOptions options_;
+};
+
+class FusedPDAttentionK4Factory final
+    : public mllm::plugin::interface::CustomizedOpFactory<nn::qnn::FusedPDAttentionK4OpOptions> {
+ public:
+  inline std::shared_ptr<mllm::BaseOp> createOpImpl(const nn::qnn::FusedPDAttentionK4OpOptions& cargo) override {
+    auto p = std::make_shared<FusedPDAttentionK4Op>(cargo);
     p->setOpType(opType());
     return p;
   }

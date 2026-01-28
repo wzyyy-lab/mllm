@@ -29,4 +29,14 @@ class QnnAOTFusedPDAttentionPattern : public QnnAOTBasePattern {
   }
 };
 
+class QnnAOTFusedPDAttentionK4Pattern : public QnnAOTBasePattern {
+ public:
+  bool isMatch(const mllm::ir::op_ptr_t& op) override;
+  bool rewrite(ir::IRWriter& writer, const ir::op_ptr_t& op) override;
+
+  static inline std::pair<OpTypes, std::shared_ptr<QnnAOTFusedPDAttentionK4Pattern>> create() {
+    return {OpTypes::kDynamicOp_Start, std::make_shared<QnnAOTFusedPDAttentionK4Pattern>()};
+  }
+};
+
 }  // namespace mllm::qnn::aot

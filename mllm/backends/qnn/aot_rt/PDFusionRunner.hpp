@@ -80,6 +80,7 @@ class PDFusionRunner {
     std::unique_ptr<QnnAOTModule> module;
     std::vector<mllm::Tensor> input_tensors;
     std::vector<mllm::Tensor> output_tensors;
+    bool mask_initialized = false;
   };
 
   PDGraphIO* get_pd_graph(int total_len);

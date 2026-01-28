@@ -42,7 +42,7 @@ LLM2QnnLoweringPass::LLM2QnnLoweringPass() {
                    QnnAOTReduceMaxPattern, QnnAOTReduceMinPattern, QnnAOTReduceMeanPattern, QnnAOTReduceSumPattern,
                    QnnAOTEqualPattern, QnnAOTWherePattern, QnnAOTSoftmaxPattern, QnnAOTSigmoidPattern, QnnAOTConv2DPattern>();
   // Backend-specific customized ops (LLaMAPackage)
-  registerPatterns<QnnAOTPDKVCacheUpdatePattern, QnnAOTFusedPDAttentionPattern>();
+  registerPatterns<QnnAOTPDKVCacheUpdatePattern, QnnAOTFusedPDAttentionPattern, QnnAOTFusedPDAttentionK4Pattern>();
 }
 
 uint8_t LLM2QnnLoweringPass::run(const ir::node_ptr_t& op) {
