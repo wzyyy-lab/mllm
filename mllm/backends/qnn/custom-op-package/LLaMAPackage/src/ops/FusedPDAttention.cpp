@@ -145,6 +145,7 @@ GraphStatus fusedPDAttentionImpl(TensorType& out_attn,
   int32_t prefill_rows = prefill_n_update;
   if (prefill_rows < 0) prefill_rows = 0;
   if (prefill_rows > max_prefill_rows) prefill_rows = max_prefill_rows;
+  const int32_t prefill_base = decode_idx - prefill_rows;
 
   const int32_t groups = (h_kv > 0) ? (h_attn / h_kv) : 1;
   if (groups <= 0) { return GraphStatus::Success; }
@@ -236,7 +237,7 @@ GraphStatus fusedPDAttentionImpl(TensorType& out_attn,
     // Allowed positions are a subset of [0..ctx_len-1].
     //  - past: [0..n_past-1]
     //  - current: if decode row -> only (past_len + decode_idx)
-    //             else -> [past_len .. past_len + row] (causal within chunk)
+    //             else -> [past_len + prefill_base .. past_len + row] (right-aligned causal within chunk)
     int32_t allowed_count = 0;
     // past positions
     for (int32_t t = 0; t < n_past; ++t) {
@@ -261,7 +262,7 @@ GraphStatus fusedPDAttentionImpl(TensorType& out_attn,
       }
       scores[allowed_count++] = dot * inv_sqrt_d;
     } else {
-      for (int32_t s = 0; s <= row; ++s) {
+      for (int32_t s = prefill_base; s <= row; ++s) {
         float dot = 0.f;
         for (int32_t d = 0; d < head_dim; ++d) {
           const int32_t k_u = (int32_t)k_curr_ptr[kcurr_off(b, hk, d, s)];
@@ -312,7 +313,7 @@ GraphStatus fusedPDAttentionImpl(TensorType& out_attn,
         outtmp[d] += w * v_f;
       }
     } else {
-      for (int32_t s = 0; s <= row; ++s) {
+      for (int32_t s = prefill_base; s <= row; ++s) {
         const float w = probs[idx++];
         for (int32_t d = 0; d < head_dim; ++d) {
           const int32_t v_u = (int32_t)v_curr_ptr[vcurr_off(b, hk, s, d)];
@@ -336,7 +337,7 @@ GraphStatus fusedPDAttentionImpl(TensorType& out_attn,
   if (prefill_active) {
     for (int32_t b = 0; b < (int32_t)b_q; ++b) {
       for (int32_t h = 0; h < (int32_t)h_attn; ++h) {
-        for (int32_t r = 0; r < prefill_rows; ++r) { run_row(b, h, r, /*is_decode_row=*/false); }
+        for (int32_t t = 0; t < prefill_rows; ++t) { run_row(b, h, prefill_base + t, /*is_decode_row=*/false); }
       }
     }
   }

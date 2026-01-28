@@ -269,7 +269,9 @@ void PDFusionRunner::init_pd_io(PDGraphIO& g) {
   const bool kv_update = config_.kv_update_on_device;
   g.output_tensors.reserve(1 + 2 * config_.num_layers + (kv_update ? 4 * config_.num_layers : 0));
 
-  auto logits = Tensor::empty({1, 1, total_len, config_.vocab_size}, kUInt16, kQNN).alloc();
+  // P0-1: PD graphs only need the last 2 rows of logits (prefill_last + decode).
+  // After right-aligned packing, runtime consumes fixed rows: [N-2, N-1] -> logits shape [1,1,2,vocab].
+  auto logits = Tensor::empty({1, 1, 2, config_.vocab_size}, kUInt16, kQNN).alloc();
   logits.setName("logits");
   g.output_tensors.push_back(logits);
 
@@ -456,24 +458,34 @@ void PDFusionRunner::prepare_io(PDGraphIO& g, const PrefillSlot& prefill, const 
   ctrl_ptr[3] = 0;
   // Will be filled after clampPast is defined.
 
-  // Prefill tokens (0..prefill_len-1). Only the first prefill_n_update tokens are valid for this step.
-  for (int i = 0; i < prefill_len; ++i) {
-    if (prefill.active && i < prefill_n_update && (prefill.prompt_pos + i) < (int64_t)prefill.prompt_tokens.size()) {
-      input_ids_ptr[i] = (int32_t)prefill.prompt_tokens[prefill.prompt_pos + i];
-    } else {
-      input_ids_ptr[i] = 0;
-    }
-    pos_ids_ptr[i] = (int32_t)(prefill.start_pos + i);
-  }
+  // P0-2: right-align prefill chunk into [base .. N-2], keeping decode fixed at N-1.
+  // This makes the two "useful" rows fixed: prefill_last=N-2, decode_last=N-1.
+  const int32_t m = (prefill.active ? prefill_n_update : 0);
+  const int32_t base = (m > 0) ? (decode_idx - m) : decode_idx;
 
-  // Decode token at the last row
-  input_ids_ptr[decode_idx] = decode.active ? (int32_t)decode.cur_token : 0;
-  pos_ids_ptr[decode_idx] = (int32_t)decode.start_pos;
-
-  // If total_len > prefill_len+1 (future extensibility), zero-fill the gap.
-  for (int i = prefill_len; i < decode_idx; ++i) {
+  // Zero-fill everything first.
+  for (int i = 0; i < total_len; ++i) {
     input_ids_ptr[i] = 0;
     pos_ids_ptr[i] = 0;
+  }
+
+  // Prefill tokens placed at [base .. decode_idx-1].
+  if (prefill.active && m > 0) {
+    for (int32_t t = 0; t < m; ++t) {
+      const int32_t row = base + t;
+      if (row < 0 || row >= decode_idx) continue;
+      const int64_t src = prefill.prompt_pos + (int64_t)t;
+      if (src >= 0 && src < (int64_t)prefill.prompt_tokens.size()) {
+        input_ids_ptr[row] = (int32_t)prefill.prompt_tokens[src];
+      }
+      pos_ids_ptr[row] = (int32_t)(prefill.start_pos + (int64_t)t);
+    }
+  }
+
+  // Decode token fixed at last row.
+  if (decode.active) {
+    input_ids_ptr[decode_idx] = (int32_t)decode.cur_token;
+    pos_ids_ptr[decode_idx] = (int32_t)decode.start_pos;
   }
 
   // Attention mask: [1, 1, total_len, context_len] (flattened as [total_len, context_len]).
@@ -496,16 +508,16 @@ void PDFusionRunner::prepare_io(PDGraphIO& g, const PrefillSlot& prefill, const 
   ctrl_ptr[4] = prefill.active ? clampPast(prefill.start_pos) : 0;
   ctrl_ptr[5] = decode.active ? clampPast(decode.start_pos) : 0;
 
-  // Prefill rows: causal within [0..prefill_n_update-1], and must NOT see decode token (last column in current window).
-  if (prefill.active && prefill_n_update > 0) {
+  // Prefill rows: only [base .. decode_idx-1] are active, causal within that interval,
+  // and must NOT see decode token (last column in current window).
+  if (prefill.active && m > 0) {
     const int32_t n_past0 = clampPast(prefill.start_pos);
-    for (int r = 0; r < prefill_n_update; ++r) {
+    for (int32_t t = 0; t < m; ++t) {
+      const int32_t r = base + t;
+      if (r < 0 || r >= decode_idx) continue;
       uint16_t* row = attn_mask_ptr + r * context_len;
-      // Allow valid past cache prefix.
       std::fill_n(row, n_past0, kAllowed);
-      // Allow causal within current prefill chunk: columns for tokens [0..r].
-      for (int j = 0; j <= r; ++j) { row[past_len + j] = kAllowed; }
-      // Decode token column (past_len + decode_idx) stays masked.
+      for (int32_t j = base; j <= r; ++j) { row[past_len + j] = kAllowed; }
     }
   }
 
@@ -571,9 +583,17 @@ void PDFusionRunner::update_kv_after_run(int total_len, const PrefillSlot& prefi
   active_prefill_->rearrangeCache(total_len);
   active_decode_->rearrangeCache(total_len);
 
-  // Slot0: write the first prefill_n_update tokens (starting at prefill.start_pos).
+  // Slot0: write the prefill_n_update tokens for this step.
+  // With right-aligned packing, prefill tokens occupy [base .. total_len-2].
   if (prefill.active && prefill_n_update > 0) {
-    active_prefill_->updateCache(total_len, (int32_t)prefill.start_pos, prefill_n_update, {});
+    const int32_t decode_idx = total_len - 1;
+    const int32_t base = decode_idx - prefill_n_update;
+    std::vector<bool> selected(total_len, false);
+    for (int32_t i = 0; i < prefill_n_update; ++i) {
+      const int32_t idx = base + i;
+      if (idx >= 0 && idx < decode_idx) { selected[idx] = true; }
+    }
+    active_prefill_->updateCache(total_len, (int32_t)prefill.start_pos, prefill_n_update, selected);
   }
 
   // Slot1: write exactly 1 token from the last row (idx=pd_total_len-1).
@@ -651,10 +671,11 @@ PDFusionRunner::StepResult PDFusionRunner::step(const PrefillSlot& prefill, cons
 
   StepResult ret;
   if (prefill.active && prefill_n_update > 0) {
-    ret.prefill_next_token = sample_token_at_idx_from_logits_tensor(g->module.get(), g->output_tensors[0], prefill_n_update - 1);
+    // P0-1/P0-2: logits only contains 2 rows: [prefill_last, decode_last].
+    ret.prefill_next_token = sample_token_at_idx_from_logits_tensor(g->module.get(), g->output_tensors[0], /*token_idx=*/0);
   }
   if (decode.active) {
-    ret.decode_next_token = sample_token_at_idx_from_logits_tensor(g->module.get(), g->output_tensors[0], total_len - 1);
+    ret.decode_next_token = sample_token_at_idx_from_logits_tensor(g->module.get(), g->output_tensors[0], /*token_idx=*/1);
   }
   return ret;
 }

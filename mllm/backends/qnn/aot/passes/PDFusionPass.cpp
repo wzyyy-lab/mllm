@@ -3,6 +3,10 @@
 
 #include "mllm/backends/qnn/aot/passes/PDFusionPass.hpp"
 
+#include <cctype>
+#include <string>
+#include <unordered_map>
+
 #include "mllm/backends/qnn/aot/passes/AOTCompileContext.hpp"
 #include "mllm/compile/ir/builtin/Attribute.hpp"
 #include "mllm/compile/ir/graph/Op.hpp"
@@ -31,41 +35,61 @@ uint8_t PDFusionPass::run(const ir::node_ptr_t& op) {
     return ir::PASS_RET_FAILURE;
   }
 
-  const std::string old_graph_name = "model.0.s" + std::to_string(total_len);
-  const std::string new_graph_name = "model.0.pd.s" + std::to_string(total_len);
-
   auto ir_ctx = getCtx();
-  auto old_graph = ir_ctx->lookupSymbolTable(old_graph_name);
-  if (!old_graph) {
-    MLLM_WARN("PDFusionPass: subgraph '{}' not found, skip renaming", old_graph_name);
-    return ir::PASS_RET_SUCCESS;
-  }
-
-  // 1) Rename the subgraph symbol.
-  if (old_graph->isa_<ir::graph::SubGraphOp>()) {
-    auto sub_g = old_graph->cast_<ir::graph::SubGraphOp>();
-    sub_g->setSymbolAttr(ir_ctx->create<ir::SymbolAttr>(new_graph_name));
-  } else {
-    MLLM_WARN("PDFusionPass: symbol '{}' is not a SubGraphOp, skip renaming", old_graph_name);
-    return ir::PASS_RET_SUCCESS;
-  }
-
-  // 2) Update call sites: any CallGraphOp referencing model.0.s{N} -> model.0.pd.s{N}.
   auto module_op = op->cast_<ir::ModuleOp>();
-  auto writer = ir::IRWriter(ir_ctx, module_op->getTopRegion());
-  writer.walk<ir::graph::CallGraphOp>([&](ir::IRWriter& /*w*/, const ir::graph::CallGraphOp::ptr_t& call_op) {
-    if (call_op->getSymbolAttr() && call_op->getSymbolAttr()->str() == old_graph_name) {
-      call_op->setSymbolAttr(ir_ctx->create<ir::SymbolAttr>(new_graph_name));
+
+  // In a "multi-bucket" build (pd.s32/s64/s128...), build_context_pd.cpp runs the pipeline multiple times with the same
+  // aot_config. The old implementation only renamed exactly one graph "model.0.s{total_len}" -> "model.0.pd.s{total_len}",
+  // leaving other buckets as "model.0.s{N}" and making runtime unable to load them.
+  //
+  // Fix: rename all subgraphs matching "model.0.s{N}" (N>1) to "model.0.pd.s{N}", and update all call sites/attrs.
+
+  std::unordered_map<std::string, std::string> rename_map;
+  auto parse_bucket_len = [](const std::string& name) -> int {
+    const std::string prefix = "model.0.s";
+    if (name.rfind(prefix, 0) != 0) return -1;
+    if (name.size() == prefix.size()) return -1;
+    for (size_t i = prefix.size(); i < name.size(); ++i) {
+      if (!std::isdigit((unsigned char)name[i])) return -1;
     }
+    return std::stoi(name.substr(prefix.size()));
+  };
+
+  {
+    auto writer = ir::IRWriter(ir_ctx, module_op->getTopRegion());
+    writer.walk<ir::graph::SubGraphOp>([&](ir::IRWriter& /*w*/, const ir::graph::SubGraphOp::ptr_t& sub_g) {
+      const std::string old_name = sub_g->getSymbolAttr()->str();
+      const int N = parse_bucket_len(old_name);
+      if (N <= 1) return ir::IRWriter::WalkResult::WALK_CONTINUE;
+      const std::string new_name = "model.0.pd.s" + std::to_string(N);
+      rename_map.emplace(old_name, new_name);
+      sub_g->setSymbolAttr(ir_ctx->create<ir::SymbolAttr>(new_name));
+      return ir::IRWriter::WalkResult::WALK_CONTINUE;
+    });
+  }
+
+  if (rename_map.empty()) {
+    MLLM_WARN("PDFusionPass: no matching subgraphs found for renaming (expected names like model.0.s32/model.0.s128)");
+    return ir::PASS_RET_SUCCESS;
+  }
+
+  auto writer = ir::IRWriter(ir_ctx, module_op->getTopRegion());
+  // 1) Update call sites.
+  writer.walk<ir::graph::CallGraphOp>([&](ir::IRWriter& /*w*/, const ir::graph::CallGraphOp::ptr_t& call_op) {
+    if (!call_op->getSymbolAttr()) return ir::IRWriter::WalkResult::WALK_CONTINUE;
+    const std::string sym = call_op->getSymbolAttr()->str();
+    auto it = rename_map.find(sym);
+    if (it != rename_map.end()) { call_op->setSymbolAttr(ir_ctx->create<ir::SymbolAttr>(it->second)); }
     return ir::IRWriter::WalkResult::WALK_CONTINUE;
   });
 
-  // 3) Best-effort update: ops that carry "qnn_graph_name" attr.
+  // 2) Best-effort update: ops that carry "qnn_graph_name" attr.
   writer.walk<ir::Op>([&](ir::IRWriter& /*w*/, const ir::Op::ptr_t& any_op) {
     auto attr = any_op->getAttr("qnn_graph_name");
-    if (attr && attr->isa_<ir::StrAttr>() && attr->cast_<ir::StrAttr>()->data() == old_graph_name) {
-      any_op->setAttr("qnn_graph_name", ir_ctx->create<ir::StrAttr>(new_graph_name));
-    }
+    if (!attr || !attr->isa_<ir::StrAttr>()) return ir::IRWriter::WalkResult::WALK_CONTINUE;
+    const std::string gname = attr->cast_<ir::StrAttr>()->data();
+    auto it = rename_map.find(gname);
+    if (it != rename_map.end()) { any_op->setAttr("qnn_graph_name", ir_ctx->create<ir::StrAttr>(it->second)); }
     return ir::IRWriter::WalkResult::WALK_CONTINUE;
   });
 

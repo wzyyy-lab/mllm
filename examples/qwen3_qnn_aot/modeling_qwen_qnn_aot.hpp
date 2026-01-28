@@ -527,10 +527,15 @@ class Qwen3Text final : public nn::Module {
         auto decode_enable = fusion_ctrl[{{1}}];
         auto prefill_n_update = fusion_ctrl[{{2}}];
 
-        auto prefill_n_past = position_ids[{{0}}];
-        auto decode_n_past = position_ids[{{decode_idx}}];
+        // Use fusion_ctrl lengths instead of position_ids so runtime can freely choose packing layout.
+        // fusion_ctrl[4]=prefill_n_past, fusion_ctrl[5]=decode_n_past
+        auto prefill_n_past = fusion_ctrl[{{4}}];
+        auto decode_n_past = fusion_ctrl[{{5}}];
 
-        auto src0 = Tensor::constant(0, kInt32);
+        // If prefill tokens are right-aligned within [0..decode_idx-1], their source offset is:
+        //   src0 = decode_idx - prefill_n_update
+        // This keeps the last prefill token at (decode_idx-1), which enables fixed "last-2 rows" gathering later.
+        auto src0 = Tensor::constant(decode_idx, kInt32) - prefill_n_update;
         auto src1 = Tensor::constant(decode_idx, kInt32);
         auto one = Tensor::constant(1, kInt32);
 
@@ -670,6 +675,16 @@ class Qwen3ForCausalLM : public ARGeneration, public nn::Module {
     }
 
     sequence = llm(llm_inputs)[0];
+    // P0-1: reduce lm_head compute and logits bandwidth for PD graphs.
+    // For PD graphs (seq_len=N>=2), only the last two rows are ever consumed by runtime:
+    // - row N-2: prefill_last (fixed after right-aligned packing)
+    // - row N-1: decode
+    if (has_pd_fusion_io) {
+      MLLM_RT_ASSERT(sequence.rank() == 4);
+      const int32_t S = (int32_t)sequence.size(2);
+      MLLM_RT_ASSERT(S >= 2);
+      sequence = sequence.slice({kAll, kAll, {S - 2, S}, kAll}, /*ssa=*/true);
+    }
     sequence = lm_head_(ptq::QDQ(this, sequence, "lm_head_input_qdq"));
     sequence = ptq::QDQ(this, sequence, "lm_head_output_qdq");
     ir::lowlevel::traceComment("    ╔═════╗   ");

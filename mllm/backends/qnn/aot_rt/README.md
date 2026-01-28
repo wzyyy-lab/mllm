@@ -20,6 +20,10 @@ Notes:
 - When there is no prefill work to fuse, use `PDFusionRunner::decodeOnly()` (graph `model.0.s1`) to avoid wasting
   `pd_total_len-1` rows of compute in the PD graph.
 
+P0 optimizations (PD graphs):
+- Prefill is packed right-aligned into `[base..N-2]` and decode is fixed at `N-1` to make "useful rows" stable.
+- PD graphs only output the last 2 logits rows (`[N-2, N-1]`) to reduce `lm_head` compute and logits bandwidth.
+
 ### Demo (AOT compile side)
 
 The example `mllm-main/examples/qwen3_qnn_aot/pd_compile.cpp` generates a PD-fusion graph (including
