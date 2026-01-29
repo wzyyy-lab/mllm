@@ -34,6 +34,8 @@ MLLM_MAIN({
                              .help("Directory containing libQnnLLaMAPackage_{CPU,HTP}.so (optional).")
                              .def("");
   auto& out_context = Argparse::add<std::string>("--out_context").help("Output QNN context path").def("qwen3_pd_context.bin");
+  auto& pd_no_mask_io =
+      Argparse::add<bool>("--pd_no_mask_io").help("Build PD graph without attention_mask IO (requires fused PD attention).").def(false);
 
   Argparse::parse(argc, argv);
 
@@ -70,13 +72,17 @@ MLLM_MAIN({
   mllm::Context::instance().registerCustomizedOp(
       mllm::kCPU, "FusedPDAttention",
       std::shared_ptr<mllm::BaseOpFactory>((mllm::BaseOpFactory*)(new mllm::qnn::FusedPDAttentionFactory())));
+  mllm::Context::instance().registerCustomizedOp(
+      mllm::kCPU, "FusedPDAttentionNoMask",
+      std::shared_ptr<mllm::BaseOpFactory>((mllm::BaseOpFactory*)(new mllm::qnn::FusedPDAttentionNoMaskFactory())));
 
   auto model = mllm::models::qwen3::Qwen3ForCausalLM(model_cfg);
   auto params = mllm::load(model_path.get(), mllm::ModelFileVersion::kV2);
   model.load(params);
 
   // Graph input naming aligns with PDFusionRunner:
-  // input_ids: [1, N], position_ids: [N], attention_mask: [1,1,N,CL], fusion_ctrl: [6]
+  // - PD (mask): input_ids: [1,N], position_ids:[N], attention_mask:[1,1,N,CL], fusion_ctrl:[6]
+  // - PD (no-mask): input_ids: [1,N], position_ids:[N], fusion_ctrl:[6]   (no attention_mask IO)
   auto input_ids = mllm::Tensor::zeros({1, N}, mllm::kInt32).setName("input_ids");
   auto position_ids = mllm::Tensor::zeros({N}, mllm::kInt32).setName("position_ids");
   auto attention_mask = mllm::Tensor::zeros({1, 1, N, CL}, mllm::kUInt16).setName("attention_mask");
@@ -84,12 +90,17 @@ MLLM_MAIN({
   //   [0]=is_prefill_active, [1]=is_decode_active, [2]=prefill_n_update, [3]=reserved,
   //   [4]=prefill_n_past, [5]=decode_n_past
   auto fusion_ctrl = mllm::Tensor::zeros({6}, mllm::kInt32).setName("fusion_ctrl");
+  // Reference-kernel runtime overrides (scalars): see PDFusionRunner::prepare_io().
+  auto ref_max_seq_override = mllm::Tensor::zeros({1, 1, 1, 1}, mllm::kInt32).setName("ref_max_seq_override");
+  auto ref_max_past_override = mllm::Tensor::zeros({1, 1, 1, 1}, mllm::kInt32).setName("ref_max_past_override");
 
   std::unordered_map<std::string, mllm::Tensor> trace_inputs;
   trace_inputs["input_ids"] = input_ids;
   trace_inputs["position_ids"] = position_ids;
-  trace_inputs["attention_mask"] = attention_mask;
+  if (!pd_no_mask_io.get()) { trace_inputs["attention_mask"] = attention_mask; }
   trace_inputs["fusion_ctrl"] = fusion_ctrl;
+  trace_inputs["ref_max_seq_override"] = ref_max_seq_override;
+  trace_inputs["ref_max_past_override"] = ref_max_past_override;
 
   // KV cache shapes (KV heads):
   //   K cache uses token-major layout: [B, H_kv, CL-N, D] (D contiguous per token)

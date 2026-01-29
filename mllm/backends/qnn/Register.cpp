@@ -49,6 +49,12 @@ void initQnnBackend(const std::string& context_path) {
   Context::instance().registerCustomizedOp(
       kQNN, "FusedPDAttentionK4",
       std::shared_ptr<BaseOpFactory>((BaseOpFactory*)(new qnn::FusedPDAttentionK4Factory())));
+  Context::instance().registerCustomizedOp(
+      kQNN, "FusedPDAttentionNoMask",
+      std::shared_ptr<BaseOpFactory>((BaseOpFactory*)(new qnn::FusedPDAttentionNoMaskFactory())));
+  Context::instance().registerCustomizedOp(
+      kQNN, "FusedPDAttentionK4NoMask",
+      std::shared_ptr<BaseOpFactory>((BaseOpFactory*)(new qnn::FusedPDAttentionK4NoMaskFactory())));
   // Also register under CPU so tracing/AOT compilation can create the op without requiring a QNN backend.
   Context::instance().registerCustomizedOp(
       kCPU, "PDKVCacheUpdate",
@@ -59,5 +65,11 @@ void initQnnBackend(const std::string& context_path) {
   Context::instance().registerCustomizedOp(
       kCPU, "FusedPDAttentionK4",
       std::shared_ptr<BaseOpFactory>((BaseOpFactory*)(new qnn::FusedPDAttentionK4Factory())));
+  Context::instance().registerCustomizedOp(
+      kCPU, "FusedPDAttentionNoMask",
+      std::shared_ptr<BaseOpFactory>((BaseOpFactory*)(new qnn::FusedPDAttentionNoMaskFactory())));
+  Context::instance().registerCustomizedOp(
+      kCPU, "FusedPDAttentionK4NoMask",
+      std::shared_ptr<BaseOpFactory>((BaseOpFactory*)(new qnn::FusedPDAttentionK4NoMaskFactory())));
 }
 }  // namespace mllm

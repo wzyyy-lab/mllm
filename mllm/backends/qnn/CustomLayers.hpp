@@ -18,6 +18,8 @@ struct DequantizeAddOpOptions : public BaseOpOptions<DequantizeAddOpOptions> {
 struct PDKVCacheUpdateOpOptions : public BaseOpOptions<PDKVCacheUpdateOpOptions> {};
 struct FusedPDAttentionOpOptions : public BaseOpOptions<FusedPDAttentionOpOptions> {};
 struct FusedPDAttentionK4OpOptions : public BaseOpOptions<FusedPDAttentionK4OpOptions> {};
+struct FusedPDAttentionNoMaskOpOptions : public BaseOpOptions<FusedPDAttentionNoMaskOpOptions> {};
+struct FusedPDAttentionK4NoMaskOpOptions : public BaseOpOptions<FusedPDAttentionK4NoMaskOpOptions> {};
 
 /**
  * @brief QNN Custom Layer: DequantizeAdd
@@ -78,6 +80,24 @@ class FusedPDAttention : public Layer {
 };
 
 /**
+ * @brief QNN Custom Layer: FusedPDAttentionNoMask
+ *
+ * Same as FusedPDAttention but without attention_mask in the op signature.
+ * This enables PD graphs to remove the large attention_mask input edge entirely.
+ *
+ * Expected inputs (v2, no-mask):
+ *   q, k_curr, v_curr, past_k_prefill, past_v_prefill, past_k_decode, past_v_decode, fusion_ctrl,
+ *   ref_max_seq_override, ref_max_past_override,
+ *   q_scale, q_zp, k_scale, k_zp, v_scale, v_zp, out_scale, out_zp
+ */
+class FusedPDAttentionNoMask : public Layer {
+ public:
+  FusedPDAttentionNoMask();
+
+  MLLM_LAYER_ANY_INPUTS_1_OUTPUTS_FORWARD
+};
+
+/**
  * @brief QNN Custom Layer: FusedPDAttentionK4
  *
  * Kernel C v3 variant for PD-k graphs (k=4 decode rows).
@@ -95,6 +115,18 @@ class FusedPDAttention : public Layer {
 class FusedPDAttentionK4 : public Layer {
  public:
   FusedPDAttentionK4();
+
+  MLLM_LAYER_ANY_INPUTS_1_OUTPUTS_FORWARD
+};
+
+/**
+ * @brief QNN Custom Layer: FusedPDAttentionK4NoMask
+ *
+ * Same as FusedPDAttentionK4 but without attention_mask in the op signature.
+ */
+class FusedPDAttentionK4NoMask : public Layer {
+ public:
+  FusedPDAttentionK4NoMask();
 
   MLLM_LAYER_ANY_INPUTS_1_OUTPUTS_FORWARD
 };
@@ -193,6 +225,35 @@ class FusedPDAttentionFactory final
   }
 };
 
+class FusedPDAttentionNoMaskOp final : public mllm::plugin::interface::CustomizedOp {
+ public:
+  explicit FusedPDAttentionNoMaskOp(const nn::qnn::FusedPDAttentionNoMaskOpOptions& options)
+      : CustomizedOp("FusedPDAttentionNoMask"), options_(options) {}
+
+  void load(const mllm::ParameterFile::ptr_t& /*ploader*/) override {}
+
+  void trace(void* trace_context, const std::vector<mllm::Tensor>& inputs, std::vector<mllm::Tensor>& outputs) override;
+
+  void forward(const std::vector<mllm::Tensor>& /*inputs*/, std::vector<mllm::Tensor>& /*outputs*/) override {}
+
+  void reshape(const std::vector<mllm::Tensor>& inputs, std::vector<mllm::Tensor>& outputs) override;
+
+  void setup(const std::vector<mllm::Tensor>& /*inputs*/, std::vector<mllm::Tensor>& /*outputs*/) override {}
+
+ protected:
+  nn::qnn::FusedPDAttentionNoMaskOpOptions options_;
+};
+
+class FusedPDAttentionNoMaskFactory final
+    : public mllm::plugin::interface::CustomizedOpFactory<nn::qnn::FusedPDAttentionNoMaskOpOptions> {
+ public:
+  inline std::shared_ptr<mllm::BaseOp> createOpImpl(const nn::qnn::FusedPDAttentionNoMaskOpOptions& cargo) override {
+    auto p = std::make_shared<FusedPDAttentionNoMaskOp>(cargo);
+    p->setOpType(opType());
+    return p;
+  }
+};
+
 class FusedPDAttentionK4Op final : public mllm::plugin::interface::CustomizedOp {
  public:
   explicit FusedPDAttentionK4Op(const nn::qnn::FusedPDAttentionK4OpOptions& options)
@@ -217,6 +278,35 @@ class FusedPDAttentionK4Factory final
  public:
   inline std::shared_ptr<mllm::BaseOp> createOpImpl(const nn::qnn::FusedPDAttentionK4OpOptions& cargo) override {
     auto p = std::make_shared<FusedPDAttentionK4Op>(cargo);
+    p->setOpType(opType());
+    return p;
+  }
+};
+
+class FusedPDAttentionK4NoMaskOp final : public mllm::plugin::interface::CustomizedOp {
+ public:
+  explicit FusedPDAttentionK4NoMaskOp(const nn::qnn::FusedPDAttentionK4NoMaskOpOptions& options)
+      : CustomizedOp("FusedPDAttentionK4NoMask"), options_(options) {}
+
+  void load(const mllm::ParameterFile::ptr_t& /*ploader*/) override {}
+
+  void trace(void* trace_context, const std::vector<mllm::Tensor>& inputs, std::vector<mllm::Tensor>& outputs) override;
+
+  void forward(const std::vector<mllm::Tensor>& /*inputs*/, std::vector<mllm::Tensor>& /*outputs*/) override {}
+
+  void reshape(const std::vector<mllm::Tensor>& inputs, std::vector<mllm::Tensor>& outputs) override;
+
+  void setup(const std::vector<mllm::Tensor>& /*inputs*/, std::vector<mllm::Tensor>& /*outputs*/) override {}
+
+ protected:
+  nn::qnn::FusedPDAttentionK4NoMaskOpOptions options_;
+};
+
+class FusedPDAttentionK4NoMaskFactory final
+    : public mllm::plugin::interface::CustomizedOpFactory<nn::qnn::FusedPDAttentionK4NoMaskOpOptions> {
+ public:
+  inline std::shared_ptr<mllm::BaseOp> createOpImpl(const nn::qnn::FusedPDAttentionK4NoMaskOpOptions& cargo) override {
+    auto p = std::make_shared<FusedPDAttentionK4NoMaskOp>(cargo);
     p->setOpType(opType());
     return p;
   }

@@ -41,6 +41,16 @@ FusedPDAttentionK4::FusedPDAttentionK4() : Layer(OpTypes::kDynamicOp_Start, Fuse
   this->impl()->__forceSetDevice(kCPU);
 }
 
+FusedPDAttentionNoMask::FusedPDAttentionNoMask() : Layer(OpTypes::kDynamicOp_Start, FusedPDAttentionNoMaskOpOptions{}) {
+  this->impl()->__forceSetOpType((mllm::OpTypes)mllm::Context::instance().lookupCustomizedOpId(mllm::kCPU, "FusedPDAttentionNoMask"));
+  this->impl()->__forceSetDevice(kCPU);
+}
+
+FusedPDAttentionK4NoMask::FusedPDAttentionK4NoMask() : Layer(OpTypes::kDynamicOp_Start, FusedPDAttentionK4NoMaskOpOptions{}) {
+  this->impl()->__forceSetOpType((mllm::OpTypes)mllm::Context::instance().lookupCustomizedOpId(mllm::kCPU, "FusedPDAttentionK4NoMask"));
+  this->impl()->__forceSetDevice(kCPU);
+}
+
 }  // namespace mllm::nn::qnn
 
 // -------------------- Custom QNN Ops --------------------
@@ -105,10 +115,11 @@ void FusedPDAttentionOp::trace(void* trace_context, const std::vector<mllm::Tens
 }
 
 void FusedPDAttentionOp::reshape(const std::vector<mllm::Tensor>& inputs, std::vector<mllm::Tensor>& outputs) {
-  // Inputs (v0):
+  // Inputs (v2):
   //   q, k_curr, v_curr, past_k_prefill, past_v_prefill, past_k_decode, past_v_decode, attention_mask, fusion_ctrl,
+  //   ref_max_seq_override, ref_max_past_override,
   //   q_scale, q_zp, k_scale, k_zp, v_scale, v_zp, out_scale, out_zp
-  MLLM_RT_ASSERT_EQ((int)inputs.size(), 17);
+  MLLM_RT_ASSERT_EQ((int)inputs.size(), 19);
   const auto& q = inputs[0];
   outputs.emplace_back(Tensor::empty(q.shape(), q.dtype(), q.device()));
 }
@@ -125,9 +136,45 @@ void FusedPDAttentionK4Op::reshape(const std::vector<mllm::Tensor>& inputs, std:
   //   q, k_curr, v_curr,
   //   past_k_prefill, past_v_prefill,
   //   past_k_dec0, past_v_dec0, past_k_dec1, past_v_dec1, past_k_dec2, past_v_dec2, past_k_dec3, past_v_dec3,
-  //   attention_mask, fusion_ctrl, decode_past_lens,
+  //   attention_mask, fusion_ctrl, decode_past_lens, ref_max_seq_override, ref_max_past_override,
   //   q_scale, q_zp, k_scale, k_zp, v_scale, v_zp, out_scale, out_zp
-  MLLM_RT_ASSERT_EQ((int)inputs.size(), 24);
+  MLLM_RT_ASSERT_EQ((int)inputs.size(), 26);
+  const auto& q = inputs[0];
+  outputs.emplace_back(Tensor::empty(q.shape(), q.dtype(), q.device()));
+}
+
+void FusedPDAttentionNoMaskOp::trace(void* trace_context, const std::vector<mllm::Tensor>& inputs, std::vector<mllm::Tensor>& outputs) {
+  auto ir_ctx = (ir::IRContext*)trace_context;
+  auto i_irs = ir::tensor::wrapTensors2TensorIR(ir_ctx, inputs);
+  auto o_irs = ir::tensor::wrapTensors2TensorIR(ir_ctx, outputs);
+  ir_ctx->create<ir::linalg::CustomizedOp>(shared_from_this(), i_irs, o_irs);
+}
+
+void FusedPDAttentionNoMaskOp::reshape(const std::vector<mllm::Tensor>& inputs, std::vector<mllm::Tensor>& outputs) {
+  // Inputs (v2, no-mask):
+  //   q, k_curr, v_curr, past_k_prefill, past_v_prefill, past_k_decode, past_v_decode, fusion_ctrl,
+  //   ref_max_seq_override, ref_max_past_override,
+  //   q_scale, q_zp, k_scale, k_zp, v_scale, v_zp, out_scale, out_zp
+  MLLM_RT_ASSERT_EQ((int)inputs.size(), 18);
+  const auto& q = inputs[0];
+  outputs.emplace_back(Tensor::empty(q.shape(), q.dtype(), q.device()));
+}
+
+void FusedPDAttentionK4NoMaskOp::trace(void* trace_context, const std::vector<mllm::Tensor>& inputs, std::vector<mllm::Tensor>& outputs) {
+  auto ir_ctx = (ir::IRContext*)trace_context;
+  auto i_irs = ir::tensor::wrapTensors2TensorIR(ir_ctx, inputs);
+  auto o_irs = ir::tensor::wrapTensors2TensorIR(ir_ctx, outputs);
+  ir_ctx->create<ir::linalg::CustomizedOp>(shared_from_this(), i_irs, o_irs);
+}
+
+void FusedPDAttentionK4NoMaskOp::reshape(const std::vector<mllm::Tensor>& inputs, std::vector<mllm::Tensor>& outputs) {
+  // Inputs (v3, k=4, no-mask):
+  //   q, k_curr, v_curr,
+  //   past_k_prefill, past_v_prefill,
+  //   past_k_dec0, past_v_dec0, past_k_dec1, past_v_dec1, past_k_dec2, past_v_dec2, past_k_dec3, past_v_dec3,
+  //   fusion_ctrl, decode_past_lens, ref_max_seq_override, ref_max_past_override,
+  //   q_scale, q_zp, k_scale, k_zp, v_scale, v_zp, out_scale, out_zp
+  MLLM_RT_ASSERT_EQ((int)inputs.size(), 25);
   const auto& q = inputs[0];
   outputs.emplace_back(Tensor::empty(q.shape(), q.dtype(), q.device()));
 }

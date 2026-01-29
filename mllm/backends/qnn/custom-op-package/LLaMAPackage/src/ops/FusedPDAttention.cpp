@@ -135,6 +135,8 @@ GraphStatus fusedPDAttentionImpl(TensorType& out_attn,
                                  const TensorType& past_v_decode,
                                  const TensorType& attention_mask,
                                  const TensorType& fusion_ctrl,
+                                 const TensorType& ref_max_seq_override,
+                                 const TensorType& ref_max_past_override,
                                  const TensorType& q_scale,
                                  const TensorType& q_zp,
                                  const TensorType& k_scale,
@@ -160,6 +162,8 @@ GraphStatus fusedPDAttentionImpl(TensorType& out_attn,
                                  const TensorType& past_v_decode,
                                  const TensorType& /*attention_mask*/,
                                  const TensorType& fusion_ctrl,
+                                 const TensorType& ref_max_seq_override,
+                                 const TensorType& ref_max_past_override,
                                  const TensorType& q_scale,
                                  const TensorType& q_zp,
                                  const TensorType& k_scale,
@@ -223,17 +227,23 @@ GraphStatus fusedPDAttentionImpl(TensorType& out_attn,
   const int32_t prefill_active = static_cast<int32_t>(fusion_ctrl(0, 0, 0, 0));
   const int32_t decode_active = static_cast<int32_t>(fusion_ctrl(0, 0, 0, 1));
   const int32_t prefill_n_update = static_cast<int32_t>(fusion_ctrl(0, 0, 0, 2));
-  // fusion_ctrl[3] is reserved by the runtime and can be used by this reference kernel as a runtime guard:
-  // - 0  : use compile-time default (MLLM_FUSED_PD_ATTENTION_REF_MAX_SEQ)
-  // - >0 : cap allowed seq_len to this value (if seq_len is larger, the op returns early)
-  // - <0 : disable seq_len guard entirely
-  const int32_t ref_max_seq_override = static_cast<int32_t>(fusion_ctrl(0, 0, 0, 3));
+  // Runtime guards for the reference kernel (independent scalar inputs; do not overload fusion_ctrl):
+  // - 0  : use compile-time default (MLLM_FUSED_PD_ATTENTION_REF_MAX_{SEQ,PAST})
+  // - >0 : cap allowed {seq_len,past_len} to this value (if larger, the op returns early/clamps)
+  // - <0 : disable the corresponding guard entirely
+  const int32_t ref_max_seq_override_i = static_cast<int32_t>(ref_max_seq_override(0, 0, 0, 0));
+  const int32_t ref_max_past_override_i = static_cast<int32_t>(ref_max_past_override(0, 0, 0, 0));
   int32_t prefill_n_past = static_cast<int32_t>(fusion_ctrl(0, 0, 0, 4));
   int32_t decode_n_past = static_cast<int32_t>(fusion_ctrl(0, 0, 0, 5));
   if (prefill_n_past < 0) prefill_n_past = 0;
   if (decode_n_past < 0) decode_n_past = 0;
-  if (prefill_n_past > past_len) prefill_n_past = past_len;
-  if (decode_n_past > past_len) decode_n_past = past_len;
+
+  int32_t eff_max_past = MLLM_FUSED_PD_ATTENTION_REF_MAX_PAST;
+  if (ref_max_past_override_i > 0) eff_max_past = ref_max_past_override_i;
+  if (ref_max_past_override_i < 0) eff_max_past = 0; // 0 => disable
+  const int32_t clamp_past = (eff_max_past > 0) ? std::min(past_len, eff_max_past) : past_len;
+  if (prefill_n_past > clamp_past) prefill_n_past = clamp_past;
+  if (decode_n_past > clamp_past) decode_n_past = clamp_past;
 
   const int32_t decode_idx = seq_len - 1;
   const int32_t max_prefill_rows = decode_idx;
@@ -268,9 +278,12 @@ GraphStatus fusedPDAttentionImpl(TensorType& out_attn,
   // Safety guard for the reference implementation:
   // avoid accidentally running very large shapes on DSP when doing smoke tests.
   int32_t eff_max_seq = MLLM_FUSED_PD_ATTENTION_REF_MAX_SEQ;
-  if (ref_max_seq_override > 0) eff_max_seq = ref_max_seq_override;
-  if (ref_max_seq_override < 0) eff_max_seq = 0;
+  if (ref_max_seq_override_i > 0) eff_max_seq = ref_max_seq_override_i;
+  if (ref_max_seq_override_i < 0) eff_max_seq = 0;
   if (eff_max_seq > 0 && seq_len > eff_max_seq) {
+    return GraphStatus::Success;
+  }
+  if (eff_max_past > 0 && past_len > eff_max_past) {
     return GraphStatus::Success;
   }
 
@@ -566,6 +579,8 @@ GraphStatus fusedPDAttentionK4Impl(TensorType& out_attn,
                                    const TensorType& /*attention_mask*/,
                                    const TensorType& fusion_ctrl,
                                    const TensorType& decode_past_lens,
+                                   const TensorType& ref_max_seq_override,
+                                   const TensorType& ref_max_past_override,
                                    const TensorType& q_scale,
                                    const TensorType& q_zp,
                                    const TensorType& k_scale,
@@ -597,6 +612,8 @@ GraphStatus fusedPDAttentionK4Impl(TensorType& out_attn,
                                    const TensorType& /*attention_mask*/,
                                    const TensorType& fusion_ctrl,
                                    const TensorType& decode_past_lens,
+                                   const TensorType& ref_max_seq_override,
+                                   const TensorType& ref_max_past_override,
                                    const TensorType& q_scale,
                                    const TensorType& q_zp,
                                    const TensorType& k_scale,
@@ -664,12 +681,22 @@ GraphStatus fusedPDAttentionK4Impl(TensorType& out_attn,
   if (prefill_n_past < 0) prefill_n_past = 0;
   if (prefill_n_past > past_len) prefill_n_past = past_len;
 
+  const int32_t ref_max_seq_override_i = static_cast<int32_t>(ref_max_seq_override(0, 0, 0, 0));
+  const int32_t ref_max_past_override_i = static_cast<int32_t>(ref_max_past_override(0, 0, 0, 0));
+
+  int32_t eff_max_past = MLLM_FUSED_PD_ATTENTION_REF_MAX_PAST;
+  if (ref_max_past_override_i > 0) eff_max_past = ref_max_past_override_i;
+  if (ref_max_past_override_i < 0) eff_max_past = 0; // 0 => disable
+  const int32_t clamp_past = (eff_max_past > 0) ? std::min(past_len, eff_max_past) : past_len;
+  if (prefill_n_past > clamp_past) prefill_n_past = clamp_past;
+
   // decode_past_lens: int32[4]
   int32_t dec_past[4] = {0, 0, 0, 0};
   for (int i = 0; i < 4; ++i) {
     dec_past[i] = static_cast<int32_t>(decode_past_lens(0, 0, 0, i));
     if (dec_past[i] < 0) dec_past[i] = 0;
     if (dec_past[i] > past_len) dec_past[i] = past_len;
+    if (dec_past[i] > clamp_past) dec_past[i] = clamp_past;
   }
 
   const int32_t decode_base = seq_len - 4;
@@ -680,6 +707,16 @@ GraphStatus fusedPDAttentionK4Impl(TensorType& out_attn,
 
   const int32_t groups = (h_kv > 0) ? ((int32_t)h_attn / (int32_t)h_kv) : 1;
   if (groups <= 0) { return GraphStatus::Success; }
+
+  int32_t eff_max_seq = MLLM_FUSED_PD_ATTENTION_REF_MAX_SEQ;
+  if (ref_max_seq_override_i > 0) eff_max_seq = ref_max_seq_override_i;
+  if (ref_max_seq_override_i < 0) eff_max_seq = 0;
+  if (eff_max_seq > 0 && seq_len > eff_max_seq) {
+    return GraphStatus::Success;
+  }
+  if (eff_max_past > 0 && past_len > eff_max_past) {
+    return GraphStatus::Success;
+  }
 
   const uint16_t* q_ptr = reinterpret_cast<const uint16_t*>(q.raw_data_const());
   const uint8_t* k_curr_ptr = reinterpret_cast<const uint8_t*>(k_curr.raw_data_const());
@@ -897,3 +934,85 @@ GraphStatus fusedPDAttentionK4Impl(TensorType& out_attn,
 __attribute__((unused)) static float fusedPDAttentionK4CostFunc(const Op* /*op*/) { return 0.0f; }
 
 END_PKG_OP_DEFINITION(PKG_FusedPDAttentionK4);
+
+// -----------------------------------------------------------------------------
+// System-level mask removal variants:
+//
+// These ops are identical to the mask-taking variants, except their signatures
+// do not include attention_mask. This allows PD graphs to remove the large
+// attention_mask input edge entirely (host no longer binds/syncs/writes it).
+//
+// NOTE: The underlying reference implementations do not read attention_mask
+// anyway, so we forward to the existing implementations with a dummy tensor.
+
+BEGIN_PKG_OP_DEFINITION(PKG_FusedPDAttentionNoMask);
+
+template<typename TensorType>
+GraphStatus fusedPDAttentionNoMaskImpl(TensorType& out_attn,
+                                       const TensorType& q,
+                                       const TensorType& k_curr,
+                                       const TensorType& v_curr,
+                                       const TensorType& past_k_prefill,
+                                       const TensorType& past_v_prefill,
+                                       const TensorType& past_k_decode,
+                                       const TensorType& past_v_decode,
+                                       const TensorType& fusion_ctrl,
+                                       const TensorType& ref_max_seq_override,
+                                       const TensorType& ref_max_past_override,
+                                       const TensorType& q_scale,
+                                       const TensorType& q_zp,
+                                       const TensorType& k_scale,
+                                       const TensorType& k_zp,
+                                       const TensorType& v_scale,
+                                       const TensorType& v_zp,
+                                       const TensorType& out_scale,
+                                       const TensorType& out_zp) {
+  // Forward to the mask-taking implementation; attention_mask is ignored there.
+  return fusedPDAttentionImpl(out_attn, q, k_curr, v_curr, past_k_prefill, past_v_prefill, past_k_decode, past_v_decode,
+                             /*attention_mask=*/q, fusion_ctrl, ref_max_seq_override, ref_max_past_override, q_scale, q_zp, k_scale, k_zp,
+                             v_scale, v_zp, out_scale, out_zp);
+}
+
+DEF_PACKAGE_OP((fusedPDAttentionNoMaskImpl<Tensor>), "FusedPDAttentionNoMask")
+
+END_PKG_OP_DEFINITION(PKG_FusedPDAttentionNoMask);
+
+BEGIN_PKG_OP_DEFINITION(PKG_FusedPDAttentionK4NoMask);
+
+template<typename TensorType>
+GraphStatus fusedPDAttentionK4NoMaskImpl(TensorType& out_attn,
+                                         const TensorType& q,
+                                         const TensorType& k_curr,
+                                         const TensorType& v_curr,
+                                         const TensorType& past_k_prefill,
+                                         const TensorType& past_v_prefill,
+                                         const TensorType& past_k_dec0,
+                                         const TensorType& past_v_dec0,
+                                         const TensorType& past_k_dec1,
+                                         const TensorType& past_v_dec1,
+                                         const TensorType& past_k_dec2,
+                                         const TensorType& past_v_dec2,
+                                         const TensorType& past_k_dec3,
+                                         const TensorType& past_v_dec3,
+                                         const TensorType& fusion_ctrl,
+                                         const TensorType& decode_past_lens,
+                                         const TensorType& ref_max_seq_override,
+                                         const TensorType& ref_max_past_override,
+                                         const TensorType& q_scale,
+                                         const TensorType& q_zp,
+                                         const TensorType& k_scale,
+                                         const TensorType& k_zp,
+                                         const TensorType& v_scale,
+                                         const TensorType& v_zp,
+                                         const TensorType& out_scale,
+                                         const TensorType& out_zp) {
+  // Forward to the mask-taking implementation; attention_mask is ignored there.
+  return fusedPDAttentionK4Impl(out_attn, q, k_curr, v_curr, past_k_prefill, past_v_prefill, past_k_dec0, past_v_dec0, past_k_dec1,
+                               past_v_dec1, past_k_dec2, past_v_dec2, past_k_dec3, past_v_dec3,
+                               /*attention_mask=*/q, fusion_ctrl, decode_past_lens, ref_max_seq_override, ref_max_past_override, q_scale, q_zp,
+                               k_scale, k_zp, v_scale, v_zp, out_scale, out_zp);
+}
+
+DEF_PACKAGE_OP((fusedPDAttentionK4NoMaskImpl<Tensor>), "FusedPDAttentionK4NoMask")
+
+END_PKG_OP_DEFINITION(PKG_FusedPDAttentionK4NoMask);

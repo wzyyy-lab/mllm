@@ -53,7 +53,8 @@ GraphStatus pdKvCacheUpdateImpl(TensorType& out_k_cache,
    * Tensor layouts (Qwen3 AOT example):
    * - K cache:      [B, H, past_len, D]   (token-major, D contiguous)
    * - V cache:      [B, H, past_len, D]
-   * - present_k:    [B, H, D, S]
+   * - present_k:    [B, H, S, D]  (preferred; token-major to enable memcpy update)
+   *                [B, H, D, S]  (legacy; supported with transpose write)
    * - present_v:    [B, H, S, D]
    * - Scalars:      int32/uint32, rank=SCALAR or [1]
    */
@@ -72,17 +73,22 @@ GraphStatus pdKvCacheUpdateImpl(TensorType& out_k_cache,
 
   auto [b_k, h_k, past_len_k, d_k] = in_k_cache.dims();
   auto [b_v, h_v, past_len_v, d_v] = in_v_cache.dims();
-  auto [b_pk, h_pk, d_pk, s_pk] = present_k.dims();
+  // present_k can be:
+  // - legacy D-major:        [B, H, D, S]
+  // - token-major (preferred): [B, H, S, D]
+  auto [b_pk, h_pk, p3_pk, p4_pk] = present_k.dims();
   auto [b_pv, h_pv, s_pv, d_pv] = present_v.dims();
 
   // Basic consistency checks (best-effort; avoid aborting in production kernels).
-  if (b_k != b_pk || h_k != h_pk || d_k != d_pk) { return GraphStatus::Success; }
+  const bool present_k_d_major = (p3_pk == d_k);
+  const bool present_k_token_major = (p4_pk == d_k);
+  if (b_k != b_pk || h_k != h_pk || (!present_k_d_major && !present_k_token_major)) { return GraphStatus::Success; }
   if (b_v != b_pv || h_v != h_pv || d_v != d_pv) { return GraphStatus::Success; }
   if (past_len_k != past_len_v) { return GraphStatus::Success; }
-  if (s_pk != s_pv) { return GraphStatus::Success; }
+  const int32_t seq_len = (int32_t)(present_k_d_major ? p4_pk : p3_pk);
+  if (seq_len != (int32_t)s_pv) { return GraphStatus::Success; }
 
   const int32_t past_len = static_cast<int32_t>(past_len_k);
-  const int32_t seq_len = static_cast<int32_t>(s_pk);
 
   if (n_past_ < 0) n_past_ = 0;
   if (src_offset_ < 0) src_offset_ = 0;
@@ -126,22 +132,39 @@ GraphStatus pdKvCacheUpdateImpl(TensorType& out_k_cache,
     std::memcpy(v_out_ptr, v_in_ptr, total_v_bytes);
   }
 
-  // K cache update:
-  // - present_k is D-major: [B,H,D,S]
-  // - cache is token-major: [B,H,past_len,D]
-  // We transpose while writing only the updated span.
-  for (Idx b = 0; b < b_k; ++b) {
-    for (Idx h = 0; h < h_k; ++h) {
-      for (Idx t = 0; t < (Idx)n_update_; ++t) {
-        const int32_t s = src_offset_ + (int32_t)t;
-        const int32_t dst_t = n_past_ + (int32_t)t;
-        if (s < 0 || s >= seq_len) continue;
-        if (dst_t < 0 || dst_t >= past_len) continue;
-        const size_t dst_row_base = (((b * h_k + h) * (size_t)past_len + (size_t)dst_t) * (size_t)d_k) * elem_bytes;
-        for (Idx d = 0; d < d_k; ++d) {
-          const size_t src_off = (((b * h_k + h) * d_k + d) * (size_t)seq_len + (size_t)s) * elem_bytes;
-          const size_t dst_off = dst_row_base + (size_t)d * elem_bytes;
-          std::memcpy(k_out_ptr + dst_off, pk_ptr + src_off, elem_bytes);
+  // K cache update (write only the updated span).
+  // Cache is token-major: [B,H,past_len,D].
+  if (present_k_token_major) {
+    // present_k: [B,H,S,D] -> copy n_update rows (each row is D contiguous)
+    const size_t row_bytes_k = (size_t)d_k * elem_bytes;
+    for (Idx b = 0; b < b_k; ++b) {
+      for (Idx h = 0; h < h_k; ++h) {
+        for (Idx t = 0; t < (Idx)n_update_; ++t) {
+          const int32_t s = src_offset_ + (int32_t)t;
+          const int32_t dst_t = n_past_ + (int32_t)t;
+          if (s < 0 || s >= seq_len) continue;
+          if (dst_t < 0 || dst_t >= past_len) continue;
+          const size_t dst_off = (((b * h_k + h) * (size_t)past_len + (size_t)dst_t) * (size_t)d_k) * elem_bytes;
+          const size_t src_off = (((b * h_k + h) * (size_t)seq_len + (size_t)s) * (size_t)d_k) * elem_bytes;
+          std::memcpy(k_out_ptr + dst_off, pk_ptr + src_off, row_bytes_k);
+        }
+      }
+    }
+  } else {
+    // present_k: [B,H,D,S] -> transpose into cache [B,H,S,D]
+    for (Idx b = 0; b < b_k; ++b) {
+      for (Idx h = 0; h < h_k; ++h) {
+        for (Idx t = 0; t < (Idx)n_update_; ++t) {
+          const int32_t s = src_offset_ + (int32_t)t;
+          const int32_t dst_t = n_past_ + (int32_t)t;
+          if (s < 0 || s >= seq_len) continue;
+          if (dst_t < 0 || dst_t >= past_len) continue;
+          const size_t dst_row_base = (((b * h_k + h) * (size_t)past_len + (size_t)dst_t) * (size_t)d_k) * elem_bytes;
+          for (Idx d = 0; d < d_k; ++d) {
+            const size_t src_off = (((b * h_k + h) * d_k + d) * (size_t)seq_len + (size_t)s) * elem_bytes;
+            const size_t dst_off = dst_row_base + (size_t)d * elem_bytes;
+            std::memcpy(k_out_ptr + dst_off, pk_ptr + src_off, elem_bytes);
+          }
         }
       }
     }

@@ -23,10 +23,16 @@ struct QnnAOTConfig {
   bool pd_fusion_enable = false;
   int pd_total_len = 128;
   int pd_prefill_len = 127;
+  // If false, PD graphs are expected to omit the large attention_mask input entirely (mask-free IO).
+  // Decode-only graphs still keep their attention_mask input.
+  bool pd_attention_mask_input = true;
 
   // If true, graphs are expected to contain on-device KV-cache update ops (e.g. LLaMAPackage::PDKVCacheUpdate),
   // and runtime should NOT run KVCacheManager::updateCache() on CPU.
   bool kv_update_on_device = false;
+  // If true and kv_update_on_device=true, require true in-place aliasing (input KV buffers == output KV buffers).
+  // If aliasing is not satisfied, fail early to avoid benchmarking a bandwidth-heavy copy path.
+  bool kv_require_true_aliasing = false;
 
   // Derived/Computed
   int max_ar_len = 128;

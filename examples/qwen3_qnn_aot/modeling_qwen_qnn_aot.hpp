@@ -170,6 +170,7 @@ class Qwen3Attention final : public nn::Module {
   nn::CausalMask mask_;
   nn::Softmax softmax_;
   nn::qnn::FusedPDAttention fused_pd_attn_;
+  nn::qnn::FusedPDAttentionNoMask fused_pd_attn_nomask_;
 
   int hidden_size_;
   int head_dim_;
@@ -202,6 +203,7 @@ class Qwen3Attention final : public nn::Module {
     mask_ = reg<nn::CausalMask>("mask");
     softmax_ = reg<nn::Softmax>("softmax", -1);
     fused_pd_attn_ = reg<nn::qnn::FusedPDAttention>("fused_pd_attn");
+    fused_pd_attn_nomask_ = reg<nn::qnn::FusedPDAttentionNoMask>("fused_pd_attn_nomask");
   }
 
   std::vector<Tensor> forward(const std::vector<Tensor>& inputs, const std::vector<AnyValue>& args) override {
@@ -211,13 +213,15 @@ class Qwen3Attention final : public nn::Module {
     auto causal_mask = inputs[3];
 
     // PD fusion optional IO:
-    // inputs[4]=fusion_ctrl, [5..8]=prefill/decode KV
-    const bool pd_fusion = inputs.size() >= 9;
+    // inputs[4]=fusion_ctrl, [5]=ref_max_seq_override, [6]=ref_max_past_override, [7..10]=prefill/decode KV
+    const bool pd_fusion = inputs.size() >= 11;
     auto fusion_ctrl = pd_fusion ? inputs[4] : Tensor::nil();
-    auto past_key = inputs[pd_fusion ? 5 : 4];
-    auto past_value = inputs[pd_fusion ? 6 : 5];
-    auto past_key_decode = pd_fusion ? inputs[7] : Tensor::nil();
-    auto past_value_decode = pd_fusion ? inputs[8] : Tensor::nil();
+    auto ref_max_seq_override = pd_fusion ? inputs[5] : Tensor::nil();
+    auto ref_max_past_override = pd_fusion ? inputs[6] : Tensor::nil();
+    auto past_key = inputs[pd_fusion ? 7 : 4];
+    auto past_value = inputs[pd_fusion ? 8 : 5];
+    auto past_key_decode = pd_fusion ? inputs[9] : Tensor::nil();
+    auto past_value_decode = pd_fusion ? inputs[10] : Tensor::nil();
 
     const int32_t seq_len = hidden_states.size(1);
 
@@ -261,8 +265,9 @@ class Qwen3Attention final : public nn::Module {
     key_states = key_states.to(kUInt8PerTensorSym);
     key_states = ptq::QDQ_KV(this, key_states, "k_cast_to_int8_qdq");
 
-    // [B, H, D, S]
-    key_states = key_states.transpose(2, 3);
+    // Keep token-major K for KV write/update: [B, H, S, D] (matches cache layout [B,H,L,D]).
+    // Create a D-major view only for attention math: [B, H, D, S].
+    auto key_states_dm = key_states.transpose(2, 3);
 
     // Handle KV Cache
     value_states = ptq::QDQ(this, value_states, "v_cast_to_int16_qdq");
@@ -273,7 +278,7 @@ class Qwen3Attention final : public nn::Module {
     if (!pd_fusion) {
       // past_key is token-major cache: [B, H_kv, L, D], but attention math expects [B, H_kv, D, L]
       auto past_key_dm = past_key.transpose(2, 3);
-      auto kh = nn::functional::concat({past_key_dm, key_states}, -1);  // [B, H_kv, D, S]
+      auto kh = nn::functional::concat({past_key_dm, key_states_dm}, -1);  // [B, H_kv, D, S]
       auto vh = nn::functional::concat({past_value, value_states}, 2);  // [B, H, S, D]
 
       // Repeat
@@ -328,10 +333,17 @@ class Qwen3Attention final : public nn::Module {
       // k_curr: [B, H_kv, D, S]
       // v_curr: [B, H_kv, S, D]
       // past_k/v_*: from inputs (two slots)
-      // attention_mask: inputs[3] (runtime-provided attention_mask)
+      // Prefer the no-mask custom op so PD graphs can omit the large attention_mask input edge entirely.
+      // Select the legacy mask-taking op only when a real uint16 attention_mask is provided.
+      const bool has_real_mask = (causal_mask.defined() && causal_mask.dtype() == kUInt16);
       auto attn_out =
-          fused_pd_attn_(query_states, key_states, value_states, past_key, past_value, past_key_decode, past_value_decode, causal_mask,
-                         fusion_ctrl, q_scale, q_zp, k_scale, k_zp, v_scale, v_zp, out_scale, out_zp)[0];
+          has_real_mask
+              ? fused_pd_attn_(query_states, key_states_dm, value_states, past_key, past_value, past_key_decode, past_value_decode, causal_mask,
+                               fusion_ctrl, ref_max_seq_override, ref_max_past_override, q_scale, q_zp, k_scale, k_zp, v_scale, v_zp,
+                               out_scale, out_zp)[0]
+              : fused_pd_attn_nomask_(query_states, key_states_dm, value_states, past_key, past_value, past_key_decode, past_value_decode,
+                                      fusion_ctrl, ref_max_seq_override, ref_max_past_override, q_scale, q_zp, k_scale, k_zp, v_scale, v_zp,
+                                      out_scale, out_zp)[0];
       // Attach output quant params for downstream QNN quant recipe (even though the kernel already outputs quantized data).
       attn_out = ptq::QDQ(this, attn_out, "attn_value_matmul_output_qdq");
       // Shape expected by downstream o_proj: [1,1,S,H*D]
@@ -350,7 +362,7 @@ class Qwen3Attention final : public nn::Module {
     auto m0 = causal_mask.slice({kAll, kAll, {0, prefill_len}, kAll}, /*ssa=*/true);
     // past_key is token-major cache: [B, H_kv, L, D], but attention math expects [B, H_kv, D, L]
     auto past_key_dm = past_key.transpose(2, 3);
-    auto kh0 = nn::functional::concat({past_key_dm, key_states}, -1).repeat(num_key_value_groups_, 1);
+    auto kh0 = nn::functional::concat({past_key_dm, key_states_dm}, -1).repeat(num_key_value_groups_, 1);
     auto vh0 = nn::functional::concat({past_value, value_states}, 2).repeat(num_key_value_groups_, 1);
 
     auto attn0 = ptq::QDQ(this, nn::functional::matmul(q0, kh0), "qk_matmul_output_qdq");
@@ -372,7 +384,7 @@ class Qwen3Attention final : public nn::Module {
     auto m1 = causal_mask.slice({kAll, kAll, {decode_idx, decode_idx + 1}, kAll}, /*ssa=*/true);
     // past_key_decode is token-major cache: [B, H_kv, L, D], but attention math expects [B, H_kv, D, L]
     auto past_key_decode_dm = past_key_decode.transpose(2, 3);
-    auto kh1 = nn::functional::concat({past_key_decode_dm, key_states}, -1).repeat(num_key_value_groups_, 1);
+    auto kh1 = nn::functional::concat({past_key_decode_dm, key_states_dm}, -1).repeat(num_key_value_groups_, 1);
     auto vh1 = nn::functional::concat({past_value_decode, value_states}, 2).repeat(num_key_value_groups_, 1);
 
     auto attn1 = ptq::QDQ(this, nn::functional::matmul(q1, kh1), "qk_matmul_output_qdq");
@@ -393,6 +405,12 @@ class Qwen3Attention final : public nn::Module {
     auto ctrl0 = fusion_ctrl[{{0}}].to(kFloat32).view({1});
     auto ctrl_zero = ctrl0 - ctrl0;
     y = y.addConstant(ctrl_zero);
+
+    // Keep runtime override scalars in the traced PD graph even when the fused kernel is disabled (no-op numerically).
+    auto s0 = ref_max_seq_override[{{0}}].to(kFloat32).view({1});
+    auto s1 = ref_max_past_override[{{0}}].to(kFloat32).view({1});
+    auto s_zero = (s0 - s0) + (s1 - s1);
+    y = y.addConstant(s_zero);
 
     return {y, key_states, value_states};
   }
@@ -421,19 +439,21 @@ class Qwen3Decoder final : public nn::Module {
     auto llm_embedding_cos = inputs[2];
     auto causal_mask = inputs[3];
 
-    const bool pd_fusion = inputs.size() >= 9;
+    const bool pd_fusion = inputs.size() >= 11;
     auto fusion_ctrl = pd_fusion ? inputs[4] : Tensor::nil();
-    auto past_key = inputs[pd_fusion ? 5 : 4];
-    auto past_value = inputs[pd_fusion ? 6 : 5];
-    auto past_key_decode = pd_fusion ? inputs[7] : Tensor::nil();
-    auto past_value_decode = pd_fusion ? inputs[8] : Tensor::nil();
+    auto ref_max_seq_override = pd_fusion ? inputs[5] : Tensor::nil();
+    auto ref_max_past_override = pd_fusion ? inputs[6] : Tensor::nil();
+    auto past_key = inputs[pd_fusion ? 7 : 4];
+    auto past_value = inputs[pd_fusion ? 8 : 5];
+    auto past_key_decode = pd_fusion ? inputs[9] : Tensor::nil();
+    auto past_value_decode = pd_fusion ? inputs[10] : Tensor::nil();
 
     auto hidden_states = inputs[0];
     hidden_states = ptq::QDQ(this, hidden_states, "input_layernorm_input_qdq");
     auto residual = hidden_states;
     hidden_states = input_layer_norm_(hidden_states);
-    auto _ = pd_fusion ? self_attn_(hidden_states, llm_embedding_sin, llm_embedding_cos, causal_mask, fusion_ctrl, past_key,
-                                   past_value, past_key_decode, past_value_decode)
+    auto _ = pd_fusion ? self_attn_(hidden_states, llm_embedding_sin, llm_embedding_cos, causal_mask, fusion_ctrl, ref_max_seq_override,
+                                   ref_max_past_override, past_key, past_value, past_key_decode, past_value_decode)
                        : self_attn_(hidden_states, llm_embedding_sin, llm_embedding_cos, causal_mask, past_key, past_value);
     hidden_states = _[0];
     hidden_states = ptq::QDQ(this, residual + ptq::QDQ(this, hidden_states, "add_0_lhs_input_qdq"), "add_0_output_qdq");
@@ -490,15 +510,23 @@ class Qwen3Text final : public nn::Module {
     x = x.to(kUInt16PerTensorAsy);
 
     const auto& position_ids = inputs[1];
-    auto causal_mask = inputs[2];
 
-    // PD fusion IO layout (optional):
-    //   inputs = [sequence, position_ids, causal_mask, fusion_ctrl,
-    //             prefill_keys(L), prefill_values(L), decode_keys(L), decode_values(L)]
-    // Legacy IO layout:
-    //   inputs = [sequence, position_ids, causal_mask, keys(L), values(L)]
-    const bool has_pd_fusion_io = (int32_t)inputs.size() >= 4 + 4 * num_hidden_layers_;
-    const int32_t base_kv = has_pd_fusion_io ? 4 : 3;
+    // IO layouts:
+    // - Legacy:       [sequence, position_ids, causal_mask, keys(L), values(L)]
+    // - PD (mask):    [sequence, position_ids, causal_mask, fusion_ctrl, ref_max_seq_override, ref_max_past_override,
+    //                 prefill_keys(L), prefill_values(L), decode_keys(L), decode_values(L)]
+    // - PD (no-mask): [sequence, position_ids, fusion_ctrl, ref_max_seq_override, ref_max_past_override,
+    //                 prefill_keys(L), prefill_values(L), decode_keys(L), decode_values(L)]
+    const bool pd_no_mask_io = ((int32_t)inputs.size() >= 5 + 4 * num_hidden_layers_) && inputs[2].defined() &&
+                               (inputs[2].dtype() == kInt32) && (inputs[2].rank() == 1) && ((int32_t)inputs[2].size(0) == 6);
+    const bool pd_mask_io = (int32_t)inputs.size() >= 6 + 4 * num_hidden_layers_;
+    const bool has_pd_fusion_io = pd_mask_io || pd_no_mask_io;
+
+    // In PD no-mask graphs, causal_mask is not part of IO. Provide a small dummy tensor so the non-fused
+    // path can still compile, and the fused attention path can select the no-mask custom op variant.
+    auto causal_mask = pd_no_mask_io ? Tensor::constant(0.f, kFloat32) : inputs[2];
+
+    const int32_t base_kv = pd_mask_io ? 6 : (pd_no_mask_io ? 5 : 3);
     const int32_t base_prefill_k = base_kv;
     const int32_t base_prefill_v = base_prefill_k + num_hidden_layers_;
     const int32_t base_decode_k = base_prefill_v + num_hidden_layers_;
@@ -512,13 +540,17 @@ class Qwen3Text final : public nn::Module {
     std::vector<Tensor> keys;
     std::vector<Tensor> values;
     std::vector<Tensor> updated_kv;
-    Tensor fusion_ctrl = has_pd_fusion_io ? inputs[3] : Tensor::nil();
+    Tensor fusion_ctrl = has_pd_fusion_io ? (pd_mask_io ? inputs[3] : inputs[2]) : Tensor::nil();
+    Tensor ref_max_seq_override = has_pd_fusion_io ? (pd_mask_io ? inputs[4] : inputs[3]) : Tensor::nil();
+    Tensor ref_max_past_override = has_pd_fusion_io ? (pd_mask_io ? inputs[5] : inputs[4]) : Tensor::nil();
     for (auto [index, block] : enumerate(blocks)) {
       auto pk0 = inputs[base_prefill_k + index];
       auto pv0 = inputs[base_prefill_v + index];
       auto pk1 = has_pd_fusion_io ? inputs[base_decode_k + index] : Tensor::nil();
       auto pv1 = has_pd_fusion_io ? inputs[base_decode_v + index] : Tensor::nil();
-      auto _ = has_pd_fusion_io ? block(x, llm_embedding_sin, llm_embedding_cos, causal_mask, fusion_ctrl, pk0, pv0, pk1, pv1)
+      auto _ = has_pd_fusion_io
+                   ? block(x, llm_embedding_sin, llm_embedding_cos, causal_mask, fusion_ctrl, ref_max_seq_override, ref_max_past_override, pk0,
+                           pv0, pk1, pv1)
                                 : block(x, llm_embedding_sin, llm_embedding_cos, causal_mask, pk0, pv0);
       x = _[0];
       keys.push_back(_[1]);
@@ -611,9 +643,9 @@ class Qwen3ForCausalLM : public ARGeneration, public nn::Module {
     // Things we need to return
     ir::IRContext::ptr_t llm_ir = nullptr;
 
-    const bool use_runtime_io_names = input.count("input_ids") && input.count("attention_mask");
-    auto sequence = use_runtime_io_names ? input.at("input_ids") : input.at("sequence");
-    auto causal_mask = use_runtime_io_names ? input.at("attention_mask") : input.at("causal_mask");
+    // Accept both "input_ids" (runtime IO naming) and "sequence" (legacy naming).
+    const bool has_input_ids = input.count("input_ids") > 0;
+    auto sequence = has_input_ids ? input.at("input_ids") : input.at("sequence");
 
     std::vector<Tensor> kv_caches;
     std::vector<Tensor> kv_caches_decode;
@@ -670,13 +702,33 @@ class Qwen3ForCausalLM : public ARGeneration, public nn::Module {
 
     ir::lowlevel::traceStart();
 
-    // Build inputs for llm: sequence, llm_embedding_sin, llm_embedding_cos, causal_mask, then all KV caches
-    std::vector<Tensor> llm_inputs = {sequence, position_ids, causal_mask};
+    // Build inputs for llm:
+    // - Legacy:       [sequence, position_ids, causal_mask, keys(L), values(L)]
+    // - PD (mask):    [sequence, position_ids, causal_mask, fusion_ctrl, ref_max_seq_override, ref_max_past_override, ...]
+    // - PD (no-mask): [sequence, position_ids, fusion_ctrl, ref_max_seq_override, ref_max_past_override, ...]
+    const bool pd_no_mask_io = has_pd_fusion_io && !input.count("attention_mask") && !input.count("causal_mask");
+    Tensor causal_mask = Tensor::nil();
+    if (!pd_no_mask_io) {
+      if (input.count("attention_mask")) {
+        causal_mask = input.at("attention_mask");
+      } else if (input.count("causal_mask")) {
+        causal_mask = input.at("causal_mask");
+      } else {
+        throw std::runtime_error("Missing attention_mask/causal_mask input for non-no-mask graph");
+      }
+    }
+
+    std::vector<Tensor> llm_inputs;
     if (has_pd_fusion_io) {
-      llm_inputs.push_back(fusion_ctrl);
+      if (pd_no_mask_io) {
+        llm_inputs = {sequence, position_ids, fusion_ctrl, input.at("ref_max_seq_override"), input.at("ref_max_past_override")};
+      } else {
+        llm_inputs = {sequence, position_ids, causal_mask, fusion_ctrl, input.at("ref_max_seq_override"), input.at("ref_max_past_override")};
+      }
       llm_inputs.insert(llm_inputs.end(), kv_caches.begin(), kv_caches.end());
       llm_inputs.insert(llm_inputs.end(), kv_caches_decode.begin(), kv_caches_decode.end());
     } else {
+      llm_inputs = {sequence, position_ids, causal_mask};
       llm_inputs.insert(llm_inputs.end(), kv_caches.begin(), kv_caches.end());
     }
 

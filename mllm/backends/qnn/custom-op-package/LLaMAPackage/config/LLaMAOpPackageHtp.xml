@@ -1308,6 +1308,30 @@ Confidential and Proprietary - Qualcomm Technologies, Inc.
             </Input>
 
             <Input>
+                <Name>ref_max_seq_override</Name>
+                <Description>
+                    <Content>reference-kernel max seq override (int32 scalar). 0=default, &gt;0=cap, &lt;0=disable</Content>
+                </Description>
+                <Mandatory>true</Mandatory>
+                <Datatype>BACKEND_SPECIFIC</Datatype>
+                <Shape>
+                    <Rank>SCALAR</Rank>
+                </Shape>
+            </Input>
+
+            <Input>
+                <Name>ref_max_past_override</Name>
+                <Description>
+                    <Content>reference-kernel max past override (int32 scalar). 0=default, &gt;0=cap, &lt;0=disable</Content>
+                </Description>
+                <Mandatory>true</Mandatory>
+                <Datatype>BACKEND_SPECIFIC</Datatype>
+                <Shape>
+                    <Rank>SCALAR</Rank>
+                </Shape>
+            </Input>
+
+            <Input>
                 <Name>q_scale</Name>
                 <Description>
                     <Content>Q dequant scale (float32 scalar)</Content>
@@ -1414,6 +1438,42 @@ Confidential and Proprietary - Qualcomm Technologies, Inc.
         </OpDef>
 
         <OpDef>
+            <Name>FusedPDAttentionNoMask</Name>
+            <Description>
+                <Content>
+                    PD-fusion attention (prefill+decode in one op) without attention_mask input.
+                    Visibility is reconstructed from fusion_ctrl; this allows PD graphs to remove the large attention_mask input edge.
+                </Content>
+            </Description>
+
+            <Input><Name>q</Name><Mandatory>true</Mandatory><Datatype>BACKEND_SPECIFIC</Datatype><Shape><Rank>4D</Rank><Layout>NHWC</Layout><Text>[N, C, H , W]</Text></Shape></Input>
+            <Input><Name>k_curr</Name><Mandatory>true</Mandatory><Datatype>BACKEND_SPECIFIC</Datatype><Shape><Rank>4D</Rank><Layout>NHWC</Layout><Text>[N, C, H , W]</Text></Shape></Input>
+            <Input><Name>v_curr</Name><Mandatory>true</Mandatory><Datatype>BACKEND_SPECIFIC</Datatype><Shape><Rank>4D</Rank><Layout>NHWC</Layout><Text>[N, C, H , W]</Text></Shape></Input>
+
+            <Input><Name>past_k_prefill</Name><Mandatory>true</Mandatory><Datatype>BACKEND_SPECIFIC</Datatype><Shape><Rank>4D</Rank><Layout>NHWC</Layout><Text>[N, C, H , W]</Text></Shape></Input>
+            <Input><Name>past_v_prefill</Name><Mandatory>true</Mandatory><Datatype>BACKEND_SPECIFIC</Datatype><Shape><Rank>4D</Rank><Layout>NHWC</Layout><Text>[N, C, H , W]</Text></Shape></Input>
+            <Input><Name>past_k_decode</Name><Mandatory>true</Mandatory><Datatype>BACKEND_SPECIFIC</Datatype><Shape><Rank>4D</Rank><Layout>NHWC</Layout><Text>[N, C, H , W]</Text></Shape></Input>
+            <Input><Name>past_v_decode</Name><Mandatory>true</Mandatory><Datatype>BACKEND_SPECIFIC</Datatype><Shape><Rank>4D</Rank><Layout>NHWC</Layout><Text>[N, C, H , W]</Text></Shape></Input>
+
+            <Input><Name>fusion_ctrl</Name><Mandatory>true</Mandatory><Datatype>BACKEND_SPECIFIC</Datatype><Shape><Rank>1D</Rank><Text>[6]</Text></Shape></Input>
+            <Input><Name>ref_max_seq_override</Name><Mandatory>true</Mandatory><Datatype>BACKEND_SPECIFIC</Datatype><Shape><Rank>SCALAR</Rank></Shape></Input>
+            <Input><Name>ref_max_past_override</Name><Mandatory>true</Mandatory><Datatype>BACKEND_SPECIFIC</Datatype><Shape><Rank>SCALAR</Rank></Shape></Input>
+
+            <Input><Name>q_scale</Name><Mandatory>true</Mandatory><Datatype>BACKEND_SPECIFIC</Datatype><Shape><Rank>SCALAR</Rank></Shape></Input>
+            <Input><Name>q_zp</Name><Mandatory>true</Mandatory><Datatype>BACKEND_SPECIFIC</Datatype><Shape><Rank>SCALAR</Rank></Shape></Input>
+            <Input><Name>k_scale</Name><Mandatory>true</Mandatory><Datatype>BACKEND_SPECIFIC</Datatype><Shape><Rank>SCALAR</Rank></Shape></Input>
+            <Input><Name>k_zp</Name><Mandatory>true</Mandatory><Datatype>BACKEND_SPECIFIC</Datatype><Shape><Rank>SCALAR</Rank></Shape></Input>
+            <Input><Name>v_scale</Name><Mandatory>true</Mandatory><Datatype>BACKEND_SPECIFIC</Datatype><Shape><Rank>SCALAR</Rank></Shape></Input>
+            <Input><Name>v_zp</Name><Mandatory>true</Mandatory><Datatype>BACKEND_SPECIFIC</Datatype><Shape><Rank>SCALAR</Rank></Shape></Input>
+            <Input><Name>out_scale</Name><Mandatory>true</Mandatory><Datatype>BACKEND_SPECIFIC</Datatype><Shape><Rank>SCALAR</Rank></Shape></Input>
+            <Input><Name>out_zp</Name><Mandatory>true</Mandatory><Datatype>BACKEND_SPECIFIC</Datatype><Shape><Rank>SCALAR</Rank></Shape></Input>
+
+            <Output><Name>out_attn</Name><Mandatory>true</Mandatory><Datatype>BACKEND_SPECIFIC</Datatype><Shape><Rank>4D</Rank><Text> [N, C, H , W] </Text></Shape></Output>
+
+            <SupportedBackend>HTP</SupportedBackend>
+        </OpDef>
+
+        <OpDef>
             <Name>FusedPDAttentionK4</Name>
             <Description>
                 <Content>
@@ -1514,6 +1574,9 @@ Confidential and Proprietary - Qualcomm Technologies, Inc.
                 </Shape>
             </Input>
 
+            <Input><Name>ref_max_seq_override</Name><Mandatory>true</Mandatory><Datatype>BACKEND_SPECIFIC</Datatype><Shape><Rank>SCALAR</Rank></Shape></Input>
+            <Input><Name>ref_max_past_override</Name><Mandatory>true</Mandatory><Datatype>BACKEND_SPECIFIC</Datatype><Shape><Rank>SCALAR</Rank></Shape></Input>
+
             <Input><Name>q_scale</Name><Mandatory>true</Mandatory><Datatype>BACKEND_SPECIFIC</Datatype><Shape><Rank>SCALAR</Rank></Shape></Input>
             <Input><Name>q_zp</Name><Mandatory>true</Mandatory><Datatype>BACKEND_SPECIFIC</Datatype><Shape><Rank>SCALAR</Rank></Shape></Input>
             <Input><Name>k_scale</Name><Mandatory>true</Mandatory><Datatype>BACKEND_SPECIFIC</Datatype><Shape><Rank>SCALAR</Rank></Shape></Input>
@@ -1532,6 +1595,51 @@ Confidential and Proprietary - Qualcomm Technologies, Inc.
                     <Text> [N, C, H , W] </Text>
                 </Shape>
             </Output>
+
+            <SupportedBackend>HTP</SupportedBackend>
+        </OpDef>
+
+        <OpDef>
+            <Name>FusedPDAttentionK4NoMask</Name>
+            <Description>
+                <Content>
+                    PD-fusion attention (k=4 decode rows) without attention_mask input.
+                    Visibility is reconstructed from fusion_ctrl + decode_past_lens.
+                </Content>
+            </Description>
+
+            <Input><Name>q</Name><Mandatory>true</Mandatory><Datatype>BACKEND_SPECIFIC</Datatype><Shape><Rank>4D</Rank><Layout>NHWC</Layout><Text>[N, C, H , W]</Text></Shape></Input>
+            <Input><Name>k_curr</Name><Mandatory>true</Mandatory><Datatype>BACKEND_SPECIFIC</Datatype><Shape><Rank>4D</Rank><Layout>NHWC</Layout><Text>[N, C, H , W]</Text></Shape></Input>
+            <Input><Name>v_curr</Name><Mandatory>true</Mandatory><Datatype>BACKEND_SPECIFIC</Datatype><Shape><Rank>4D</Rank><Layout>NHWC</Layout><Text>[N, C, H , W]</Text></Shape></Input>
+
+            <Input><Name>past_k_prefill</Name><Mandatory>true</Mandatory><Datatype>BACKEND_SPECIFIC</Datatype><Shape><Rank>4D</Rank><Layout>NHWC</Layout><Text>[N, C, H , W]</Text></Shape></Input>
+            <Input><Name>past_v_prefill</Name><Mandatory>true</Mandatory><Datatype>BACKEND_SPECIFIC</Datatype><Shape><Rank>4D</Rank><Layout>NHWC</Layout><Text>[N, C, H , W]</Text></Shape></Input>
+
+            <Input><Name>past_k_dec0</Name><Mandatory>true</Mandatory><Datatype>BACKEND_SPECIFIC</Datatype><Shape><Rank>4D</Rank><Layout>NHWC</Layout><Text>[N, C, H , W]</Text></Shape></Input>
+            <Input><Name>past_v_dec0</Name><Mandatory>true</Mandatory><Datatype>BACKEND_SPECIFIC</Datatype><Shape><Rank>4D</Rank><Layout>NHWC</Layout><Text>[N, C, H , W]</Text></Shape></Input>
+            <Input><Name>past_k_dec1</Name><Mandatory>true</Mandatory><Datatype>BACKEND_SPECIFIC</Datatype><Shape><Rank>4D</Rank><Layout>NHWC</Layout><Text>[N, C, H , W]</Text></Shape></Input>
+            <Input><Name>past_v_dec1</Name><Mandatory>true</Mandatory><Datatype>BACKEND_SPECIFIC</Datatype><Shape><Rank>4D</Rank><Layout>NHWC</Layout><Text>[N, C, H , W]</Text></Shape></Input>
+            <Input><Name>past_k_dec2</Name><Mandatory>true</Mandatory><Datatype>BACKEND_SPECIFIC</Datatype><Shape><Rank>4D</Rank><Layout>NHWC</Layout><Text>[N, C, H , W]</Text></Shape></Input>
+            <Input><Name>past_v_dec2</Name><Mandatory>true</Mandatory><Datatype>BACKEND_SPECIFIC</Datatype><Shape><Rank>4D</Rank><Layout>NHWC</Layout><Text>[N, C, H , W]</Text></Shape></Input>
+            <Input><Name>past_k_dec3</Name><Mandatory>true</Mandatory><Datatype>BACKEND_SPECIFIC</Datatype><Shape><Rank>4D</Rank><Layout>NHWC</Layout><Text>[N, C, H , W]</Text></Shape></Input>
+            <Input><Name>past_v_dec3</Name><Mandatory>true</Mandatory><Datatype>BACKEND_SPECIFIC</Datatype><Shape><Rank>4D</Rank><Layout>NHWC</Layout><Text>[N, C, H , W]</Text></Shape></Input>
+
+            <Input><Name>fusion_ctrl</Name><Mandatory>true</Mandatory><Datatype>BACKEND_SPECIFIC</Datatype><Shape><Rank>1D</Rank><Text>[6]</Text></Shape></Input>
+            <Input><Name>decode_past_lens</Name><Mandatory>true</Mandatory><Datatype>BACKEND_SPECIFIC</Datatype><Shape><Rank>1D</Rank><Text>[4]</Text></Shape></Input>
+
+            <Input><Name>ref_max_seq_override</Name><Mandatory>true</Mandatory><Datatype>BACKEND_SPECIFIC</Datatype><Shape><Rank>SCALAR</Rank></Shape></Input>
+            <Input><Name>ref_max_past_override</Name><Mandatory>true</Mandatory><Datatype>BACKEND_SPECIFIC</Datatype><Shape><Rank>SCALAR</Rank></Shape></Input>
+
+            <Input><Name>q_scale</Name><Mandatory>true</Mandatory><Datatype>BACKEND_SPECIFIC</Datatype><Shape><Rank>SCALAR</Rank></Shape></Input>
+            <Input><Name>q_zp</Name><Mandatory>true</Mandatory><Datatype>BACKEND_SPECIFIC</Datatype><Shape><Rank>SCALAR</Rank></Shape></Input>
+            <Input><Name>k_scale</Name><Mandatory>true</Mandatory><Datatype>BACKEND_SPECIFIC</Datatype><Shape><Rank>SCALAR</Rank></Shape></Input>
+            <Input><Name>k_zp</Name><Mandatory>true</Mandatory><Datatype>BACKEND_SPECIFIC</Datatype><Shape><Rank>SCALAR</Rank></Shape></Input>
+            <Input><Name>v_scale</Name><Mandatory>true</Mandatory><Datatype>BACKEND_SPECIFIC</Datatype><Shape><Rank>SCALAR</Rank></Shape></Input>
+            <Input><Name>v_zp</Name><Mandatory>true</Mandatory><Datatype>BACKEND_SPECIFIC</Datatype><Shape><Rank>SCALAR</Rank></Shape></Input>
+            <Input><Name>out_scale</Name><Mandatory>true</Mandatory><Datatype>BACKEND_SPECIFIC</Datatype><Shape><Rank>SCALAR</Rank></Shape></Input>
+            <Input><Name>out_zp</Name><Mandatory>true</Mandatory><Datatype>BACKEND_SPECIFIC</Datatype><Shape><Rank>SCALAR</Rank></Shape></Input>
+
+            <Output><Name>out_attn</Name><Mandatory>true</Mandatory><Datatype>BACKEND_SPECIFIC</Datatype><Shape><Rank>4D</Rank><Text> [N, C, H , W] </Text></Shape></Output>
 
             <SupportedBackend>HTP</SupportedBackend>
         </OpDef>
@@ -1621,6 +1729,9 @@ Confidential and Proprietary - Qualcomm Technologies, Inc.
             <OpName>IRoPE</OpName>
             <OpName>PDKVCacheUpdate</OpName>
             <OpName>FusedPDAttention</OpName>
+            <OpName>FusedPDAttentionNoMask</OpName>
+            <OpName>FusedPDAttentionK4</OpName>
+            <OpName>FusedPDAttentionK4NoMask</OpName>
             <OpName>LLaMAQuantize</OpName>
             <OpName>LLaMAMul</OpName>
             <OpName>LLaMAAdd</OpName>
@@ -1786,6 +1897,14 @@ Confidential and Proprietary - Qualcomm Technologies, Inc.
                 <Datatype>QNN_DATATYPE_INT_32</Datatype>
             </Input>
             <Input>
+                <Name>ref_max_seq_override</Name>
+                <Datatype>QNN_DATATYPE_INT_32</Datatype>
+            </Input>
+            <Input>
+                <Name>ref_max_past_override</Name>
+                <Datatype>QNN_DATATYPE_INT_32</Datatype>
+            </Input>
+            <Input>
                 <Name>q_scale</Name>
                 <Datatype>QNN_DATATYPE_FLOAT_32</Datatype>
             </Input>
@@ -1825,6 +1944,32 @@ Confidential and Proprietary - Qualcomm Technologies, Inc.
             </Output>
           </SupplementalOpDef>
 
+          <!--FusedPDAttentionNoMask-->
+          <SupplementalOpDef>
+              <Name>FusedPDAttentionNoMask</Name>
+
+              <Input><Name>q</Name><Datatype>QNN_DATATYPE_FLOAT_16</Datatype><Datatype>QNN_DATATYPE_UFIXED_POINT_16</Datatype></Input>
+              <Input><Name>k_curr</Name><Datatype>QNN_DATATYPE_UFIXED_POINT_8</Datatype></Input>
+              <Input><Name>v_curr</Name><Datatype>QNN_DATATYPE_UFIXED_POINT_8</Datatype></Input>
+              <Input><Name>past_k_prefill</Name><Datatype>QNN_DATATYPE_UFIXED_POINT_8</Datatype></Input>
+              <Input><Name>past_v_prefill</Name><Datatype>QNN_DATATYPE_UFIXED_POINT_8</Datatype></Input>
+              <Input><Name>past_k_decode</Name><Datatype>QNN_DATATYPE_UFIXED_POINT_8</Datatype></Input>
+              <Input><Name>past_v_decode</Name><Datatype>QNN_DATATYPE_UFIXED_POINT_8</Datatype></Input>
+              <Input><Name>fusion_ctrl</Name><Datatype>QNN_DATATYPE_INT_32</Datatype></Input>
+              <Input><Name>ref_max_seq_override</Name><Datatype>QNN_DATATYPE_INT_32</Datatype></Input>
+              <Input><Name>ref_max_past_override</Name><Datatype>QNN_DATATYPE_INT_32</Datatype></Input>
+              <Input><Name>q_scale</Name><Datatype>QNN_DATATYPE_FLOAT_32</Datatype></Input>
+              <Input><Name>q_zp</Name><Datatype>QNN_DATATYPE_INT_32</Datatype></Input>
+              <Input><Name>k_scale</Name><Datatype>QNN_DATATYPE_FLOAT_32</Datatype></Input>
+              <Input><Name>k_zp</Name><Datatype>QNN_DATATYPE_INT_32</Datatype></Input>
+              <Input><Name>v_scale</Name><Datatype>QNN_DATATYPE_FLOAT_32</Datatype></Input>
+              <Input><Name>v_zp</Name><Datatype>QNN_DATATYPE_INT_32</Datatype></Input>
+              <Input><Name>out_scale</Name><Datatype>QNN_DATATYPE_FLOAT_32</Datatype></Input>
+              <Input><Name>out_zp</Name><Datatype>QNN_DATATYPE_INT_32</Datatype></Input>
+
+              <Output><Name>out_attn</Name><Datatype>QNN_DATATYPE_FLOAT_16</Datatype><Datatype>QNN_DATATYPE_UFIXED_POINT_16</Datatype></Output>
+          </SupplementalOpDef>
+
           <!--FusedPDAttentionK4-->
           <SupplementalOpDef>
               <Name>FusedPDAttentionK4</Name>
@@ -1849,6 +1994,8 @@ Confidential and Proprietary - Qualcomm Technologies, Inc.
               <Input><Name>attention_mask</Name><Datatype>QNN_DATATYPE_UFIXED_POINT_16</Datatype></Input>
               <Input><Name>fusion_ctrl</Name><Datatype>QNN_DATATYPE_INT_32</Datatype></Input>
               <Input><Name>decode_past_lens</Name><Datatype>QNN_DATATYPE_INT_32</Datatype></Input>
+              <Input><Name>ref_max_seq_override</Name><Datatype>QNN_DATATYPE_INT_32</Datatype></Input>
+              <Input><Name>ref_max_past_override</Name><Datatype>QNN_DATATYPE_INT_32</Datatype></Input>
               <Input><Name>q_scale</Name><Datatype>QNN_DATATYPE_FLOAT_32</Datatype></Input>
               <Input><Name>q_zp</Name><Datatype>QNN_DATATYPE_INT_32</Datatype></Input>
               <Input><Name>k_scale</Name><Datatype>QNN_DATATYPE_FLOAT_32</Datatype></Input>
@@ -1863,6 +2010,39 @@ Confidential and Proprietary - Qualcomm Technologies, Inc.
                   <Datatype>QNN_DATATYPE_FLOAT_16</Datatype>
                   <Datatype>QNN_DATATYPE_UFIXED_POINT_16</Datatype>
               </Output>
+          </SupplementalOpDef>
+
+          <!--FusedPDAttentionK4NoMask-->
+          <SupplementalOpDef>
+              <Name>FusedPDAttentionK4NoMask</Name>
+
+              <Input><Name>q</Name><Datatype>QNN_DATATYPE_FLOAT_16</Datatype><Datatype>QNN_DATATYPE_UFIXED_POINT_16</Datatype></Input>
+              <Input><Name>k_curr</Name><Datatype>QNN_DATATYPE_UFIXED_POINT_8</Datatype></Input>
+              <Input><Name>v_curr</Name><Datatype>QNN_DATATYPE_UFIXED_POINT_8</Datatype></Input>
+              <Input><Name>past_k_prefill</Name><Datatype>QNN_DATATYPE_UFIXED_POINT_8</Datatype></Input>
+              <Input><Name>past_v_prefill</Name><Datatype>QNN_DATATYPE_UFIXED_POINT_8</Datatype></Input>
+              <Input><Name>past_k_dec0</Name><Datatype>QNN_DATATYPE_UFIXED_POINT_8</Datatype></Input>
+              <Input><Name>past_v_dec0</Name><Datatype>QNN_DATATYPE_UFIXED_POINT_8</Datatype></Input>
+              <Input><Name>past_k_dec1</Name><Datatype>QNN_DATATYPE_UFIXED_POINT_8</Datatype></Input>
+              <Input><Name>past_v_dec1</Name><Datatype>QNN_DATATYPE_UFIXED_POINT_8</Datatype></Input>
+              <Input><Name>past_k_dec2</Name><Datatype>QNN_DATATYPE_UFIXED_POINT_8</Datatype></Input>
+              <Input><Name>past_v_dec2</Name><Datatype>QNN_DATATYPE_UFIXED_POINT_8</Datatype></Input>
+              <Input><Name>past_k_dec3</Name><Datatype>QNN_DATATYPE_UFIXED_POINT_8</Datatype></Input>
+              <Input><Name>past_v_dec3</Name><Datatype>QNN_DATATYPE_UFIXED_POINT_8</Datatype></Input>
+              <Input><Name>fusion_ctrl</Name><Datatype>QNN_DATATYPE_INT_32</Datatype></Input>
+              <Input><Name>decode_past_lens</Name><Datatype>QNN_DATATYPE_INT_32</Datatype></Input>
+              <Input><Name>ref_max_seq_override</Name><Datatype>QNN_DATATYPE_INT_32</Datatype></Input>
+              <Input><Name>ref_max_past_override</Name><Datatype>QNN_DATATYPE_INT_32</Datatype></Input>
+              <Input><Name>q_scale</Name><Datatype>QNN_DATATYPE_FLOAT_32</Datatype></Input>
+              <Input><Name>q_zp</Name><Datatype>QNN_DATATYPE_INT_32</Datatype></Input>
+              <Input><Name>k_scale</Name><Datatype>QNN_DATATYPE_FLOAT_32</Datatype></Input>
+              <Input><Name>k_zp</Name><Datatype>QNN_DATATYPE_INT_32</Datatype></Input>
+              <Input><Name>v_scale</Name><Datatype>QNN_DATATYPE_FLOAT_32</Datatype></Input>
+              <Input><Name>v_zp</Name><Datatype>QNN_DATATYPE_INT_32</Datatype></Input>
+              <Input><Name>out_scale</Name><Datatype>QNN_DATATYPE_FLOAT_32</Datatype></Input>
+              <Input><Name>out_zp</Name><Datatype>QNN_DATATYPE_INT_32</Datatype></Input>
+
+              <Output><Name>out_attn</Name><Datatype>QNN_DATATYPE_FLOAT_16</Datatype><Datatype>QNN_DATATYPE_UFIXED_POINT_16</Datatype></Output>
           </SupplementalOpDef>
 
 

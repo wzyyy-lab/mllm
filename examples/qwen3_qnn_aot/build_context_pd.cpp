@@ -51,6 +51,9 @@ MLLM_MAIN({
   auto& total_lens = Argparse::add<std::string>("--total_lens").help("Comma-separated PD total lens (e.g. 32,64,128).").def("");
   auto& total_len = Argparse::add<int>("--total_len").help("PD total length (prefill+decode).").def(128);
   auto& context_len = Argparse::add<int>("--context_len").help("Context length").def(1024);
+  auto& pd_no_mask_io = Argparse::add<bool>("--pd_no_mask_io")
+                            .help("Build PD graphs without attention_mask IO (requires fused PD attention).")
+                            .def(false);
 
   Argparse::parse(argc, argv);
 
@@ -96,6 +99,9 @@ MLLM_MAIN({
   mllm::Context::instance().registerCustomizedOp(
       mllm::kCPU, "FusedPDAttention",
       std::shared_ptr<mllm::BaseOpFactory>((mllm::BaseOpFactory*)(new mllm::qnn::FusedPDAttentionFactory())));
+  mllm::Context::instance().registerCustomizedOp(
+      mllm::kCPU, "FusedPDAttentionNoMask",
+      std::shared_ptr<mllm::BaseOpFactory>((mllm::BaseOpFactory*)(new mllm::qnn::FusedPDAttentionNoMaskFactory())));
 
   auto model = mllm::models::qwen3::Qwen3ForCausalLM(model_cfg);
   auto params = mllm::load(model_path.get(), mllm::ModelFileVersion::kV2);
@@ -118,11 +124,16 @@ MLLM_MAIN({
     //   [0]=is_prefill_active, [1]=is_decode_active, [2]=prefill_n_update, [3]=reserved,
     //   [4]=prefill_n_past, [5]=decode_n_past
     auto fusion_ctrl = mllm::Tensor::zeros({6}, mllm::kInt32).setName("fusion_ctrl");
+    // Reference-kernel runtime overrides (scalars): see PDFusionRunner::prepare_io().
+    auto ref_max_seq_override = mllm::Tensor::zeros({1, 1, 1, 1}, mllm::kInt32).setName("ref_max_seq_override");
+    auto ref_max_past_override = mllm::Tensor::zeros({1, 1, 1, 1}, mllm::kInt32).setName("ref_max_past_override");
 
     trace_inputs["input_ids"] = input_ids;
     trace_inputs["position_ids"] = position_ids;
-    trace_inputs["attention_mask"] = attention_mask;
+    if (!pd_no_mask_io.get()) { trace_inputs["attention_mask"] = attention_mask; }
     trace_inputs["fusion_ctrl"] = fusion_ctrl;
+    trace_inputs["ref_max_seq_override"] = ref_max_seq_override;
+    trace_inputs["ref_max_past_override"] = ref_max_past_override;
 
     const int past_len = CL - N;
     for (int i = 0; i < model_cfg.num_hidden_layers; ++i) {

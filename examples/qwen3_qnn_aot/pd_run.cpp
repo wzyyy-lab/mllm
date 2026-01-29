@@ -31,6 +31,8 @@ MLLM_MAIN({
   auto& total_len = Argparse::add<int>("--total_len").help("PD total length (prefill+decode)").def(128);
   auto& context_len = Argparse::add<int>("--context_len").help("Context length").def(1024);
   auto& max_gen = Argparse::add<int>("--max_gen").help("Max decode tokens for overlapped demo").def(32);
+  auto& pd_no_mask_io =
+      Argparse::add<bool>("--pd_no_mask_io").help("Run PD graphs without attention_mask IO (must match compiled context).").def(false);
 
   Argparse::parse(argc, argv);
 
@@ -55,6 +57,7 @@ MLLM_MAIN({
   cfg.pd_fusion_enable = true;
   cfg.pd_total_len = total_len.get();
   cfg.pd_prefill_len = cfg.pd_total_len - 1;
+  cfg.pd_attention_mask_input = !pd_no_mask_io.get();
 
   // Keep consistent with existing aot_rt usage.
   cfg.use_int64_token = false;

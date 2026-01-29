@@ -68,7 +68,8 @@ void TokenGenerator<T>::init_io() {
   // 2. KV Caches, should be consistant with modeling file, or it will cause error
   for (int l = 0; l < config_.num_layers; ++l) {
     // K Output
-    auto k_tensor = Tensor::empty({1, (int)config_.num_heads, config_.head_dim, 1}, config_.kv_dtype, kQNN);
+    // present_key is token-major: [B, H, S, D] where S=1 for decode-only
+    auto k_tensor = Tensor::empty({1, (int)config_.num_heads, 1, config_.head_dim}, config_.kv_dtype, kQNN);
     k_tensor.impl()->storage()->ptr_ = k_caches[l].output_buffer;
     k_tensor.impl()->storage()->mem_type_ = kManual;
     k_tensor.setName("present_key_" + std::to_string(l));

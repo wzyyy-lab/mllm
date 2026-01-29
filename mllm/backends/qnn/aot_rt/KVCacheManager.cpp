@@ -254,9 +254,9 @@ template<typename T>
 void KVCacheManager<T>::updateKey(KVCache<T>& k_cache, int32_t n_past, int32_t n_update, const std::vector<bool>& selected) {
   // Key cache uses token-major layout matching value cache:
   //   cache buffer:  [H, past_len, D] (D contiguous)
-  //   graph output:  present_key = [H, D, ar_len] (D-major, ar_len last)
+  //   graph output:  present_key = [H, ar_len, D] (token-major, D contiguous per token)
   //
-  // This function transposes from present_key to cache layout while updating only the [n_past .. n_past+n_update) span.
+  // After switching present_key to token-major in the traced model, update becomes a contiguous block copy per head.
   T* cache_ptr = k_cache.buffer;
   T* present_ptr = k_cache.output_buffer;
 
@@ -285,23 +285,21 @@ void KVCacheManager<T>::updateKey(KVCache<T>& k_cache, int32_t n_past, int32_t n
     }
   }
 
-  // present_ptr layout: ((h * head_dim + d) * ar_len + t)
+  // present_ptr layout: ((h * ar_len + t) * head_dim + d)
   // cache_ptr layout:   (h * cache_tokens + (n_past + t)) * head_dim + d
   for (int32_t h = 0; h < n_heads; ++h) {
     T* cache_h = cache_ptr + (size_t)h * (size_t)cache_tokens * (size_t)head_dim + (size_t)n_past * (size_t)head_dim;
-    const T* present_h = present_ptr + (size_t)h * (size_t)head_dim * (size_t)ar_len;
+    const T* present_h = present_ptr + (size_t)h * (size_t)ar_len * (size_t)head_dim;
     if (selected.empty()) {
       for (int32_t t = 0; t < n_update; ++t) {
-        for (int32_t d = 0; d < head_dim; ++d) {
-          cache_h[(size_t)t * (size_t)head_dim + (size_t)d] = present_h[(size_t)d * (size_t)ar_len + (size_t)t];
-        }
+        std::memcpy(cache_h + (size_t)t * (size_t)head_dim, present_h + (size_t)t * (size_t)head_dim,
+                    (size_t)head_dim * sizeof(T));
       }
     } else {
       for (int32_t t = 0; t < n_update; ++t) {
         const int32_t src_t = (t < (int32_t)ar_indices.size()) ? ar_indices[t] : t;
-        for (int32_t d = 0; d < head_dim; ++d) {
-          cache_h[(size_t)t * (size_t)head_dim + (size_t)d] = present_h[(size_t)d * (size_t)ar_len + (size_t)src_t];
-        }
+        std::memcpy(cache_h + (size_t)t * (size_t)head_dim, present_h + (size_t)src_t * (size_t)head_dim,
+                    (size_t)head_dim * sizeof(T));
       }
     }
   }

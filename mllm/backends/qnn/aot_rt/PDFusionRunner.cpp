@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cstring>
 #include <numeric>
+#include <stdexcept>
 #include <string>
 #include <utility>
 
@@ -24,6 +25,8 @@ constexpr const char* kInputIdsName = "input_ids";
 constexpr const char* kPositionIdsName = "position_ids";
 constexpr const char* kAttentionMaskName = "attention_mask";
 constexpr const char* kFusionCtrlName = "fusion_ctrl";
+constexpr const char* kRefMaxSeqOverrideName = "ref_max_seq_override";
+constexpr const char* kRefMaxPastOverrideName = "ref_max_past_override";
 
 inline std::string pastKeyName(int layer, const char* slot) { return "past_key_" + std::string(slot) + "_" + std::to_string(layer); }
 inline std::string pastValueName(int layer, const char* slot) { return "past_value_" + std::string(slot) + "_" + std::to_string(layer); }
@@ -139,7 +142,7 @@ void PDFusionRunner::bindCaches(KVCacheManager<uint8_t>* prefill, KVCacheManager
   const auto& v1 = active_decode_->getVCache();
 
   for (auto& [_, g] : pd_graphs_) {
-    const int base = 4;
+    const int base = config_.pd_attention_mask_input ? 6 : 5;
     for (int l = 0; l < L; ++l) {
       g.input_tensors[base + l].impl()->storage()->ptr_ = k0[l].buffer;
       g.input_tensors[base + L + l].impl()->storage()->ptr_ = v0[l].buffer;
@@ -195,7 +198,7 @@ void PDFusionRunner::init_pd_io(PDGraphIO& g) {
   g.input_tensors.clear();
   g.output_tensors.clear();
 
-  g.input_tensors.reserve(4 + 4 * config_.num_layers);
+  g.input_tensors.reserve((config_.pd_attention_mask_input ? 6 : 5) + 4 * config_.num_layers);
 
   const int total_len = g.total_len;
   const int32_t past_len = g.past_len;
@@ -210,12 +213,14 @@ void PDFusionRunner::init_pd_io(PDGraphIO& g) {
   pos_ids.setName(kPositionIdsName);
   g.input_tensors.push_back(pos_ids);
 
-  // 3) attention_mask: [1, 1, total_len, context_len]
-  auto attn_mask = Tensor::empty({1, 1, total_len, config_.context_len}, kUInt16, kQNN).alloc();
-  attn_mask.setName(kAttentionMaskName);
-  g.input_tensors.push_back(attn_mask);
+  // 3) attention_mask: [1, 1, total_len, context_len] (optional for PD no-mask graphs)
+  if (config_.pd_attention_mask_input) {
+    auto attn_mask = Tensor::empty({1, 1, total_len, config_.context_len}, kUInt16, kQNN).alloc();
+    attn_mask.setName(kAttentionMaskName);
+    g.input_tensors.push_back(attn_mask);
+  }
 
-  // 4) fusion_ctrl: [6]
+  // fusion_ctrl: [6]
   //   [0]=is_prefill_active, [1]=is_decode_active,
   //   [2]=prefill_n_update (used by PDKVCacheUpdate),
   //   [3]=reserved,
@@ -225,7 +230,18 @@ void PDFusionRunner::init_pd_io(PDGraphIO& g) {
   fusion_ctrl.setName(kFusionCtrlName);
   g.input_tensors.push_back(fusion_ctrl);
 
-  // 5) KV caches for slot0(prefill) and slot1(decode)
+  // 5) Reference-kernel runtime overrides (scalars):
+  // - 0  : use compile-time default (MLLM_FUSED_PD_ATTENTION_REF_MAX_{SEQ,PAST})
+  // - >0 : cap allowed {seq_len,past_len}
+  // - <0 : disable the corresponding guard entirely (recommended for real runs)
+  auto ref_max_seq_override = Tensor::empty({1, 1, 1, 1}, kInt32, kQNN).alloc();
+  ref_max_seq_override.setName(kRefMaxSeqOverrideName);
+  g.input_tensors.push_back(ref_max_seq_override);
+  auto ref_max_past_override = Tensor::empty({1, 1, 1, 1}, kInt32, kQNN).alloc();
+  ref_max_past_override.setName(kRefMaxPastOverrideName);
+  g.input_tensors.push_back(ref_max_past_override);
+
+  // 6) KV caches for slot0(prefill) and slot1(decode)
   const auto& k_prefill = kv_prefill_->getKCache();
   const auto& v_prefill = kv_prefill_->getVCache();
   const auto& k_decode = kv_decode_->getKCache();
@@ -278,7 +294,8 @@ void PDFusionRunner::init_pd_io(PDGraphIO& g) {
 
   // Use kv_prefill_ output buffers as the canonical "present_*" storage.
   for (int l = 0; l < config_.num_layers; ++l) {
-    auto k_out = Tensor::empty({1, config_.num_heads, config_.head_dim, total_len}, config_.kv_dtype, kQNN);
+    // present_key is token-major: [B, H, S, D]
+    auto k_out = Tensor::empty({1, config_.num_heads, total_len, config_.head_dim}, config_.kv_dtype, kQNN);
     k_out.impl()->storage()->ptr_ = kv_prefill_->getKCache()[l].output_buffer;
     k_out.impl()->storage()->mem_type_ = kManual;
     k_out.setName(presentKeyName(l));
@@ -374,7 +391,8 @@ void PDFusionRunner::init_decode_io() {
   decode_output_tensors_.push_back(logits);
 
   for (int l = 0; l < config_.num_layers; ++l) {
-    auto k_out = Tensor::empty({1, config_.num_heads, config_.head_dim, 1}, config_.kv_dtype, kQNN);
+    // present_key is token-major: [B, H, S, D] where S=1 for decode-only
+    auto k_out = Tensor::empty({1, config_.num_heads, 1, config_.head_dim}, config_.kv_dtype, kQNN);
     k_out.impl()->storage()->ptr_ = kv_decode_->getKCache()[l].output_buffer;
     k_out.impl()->storage()->mem_type_ = kManual;
     k_out.setName(presentKeyName(l));
@@ -417,7 +435,7 @@ void PDFusionRunner::prepare_io(PDGraphIO& g, const PrefillSlot& prefill, const 
 
   if (config_.kv_update_on_device && !warned_kv_aliasing_) {
     const int L = config_.num_layers;
-    const int in_base = 4;
+    const int in_base = config_.pd_attention_mask_input ? 6 : 5;
     const int out_base_upd = 1 + 2 * L;
     bool all_aliased = true;
     if ((int)g.input_tensors.size() >= in_base + 4 * L && (int)g.output_tensors.size() >= out_base_upd + 4 * L) {
@@ -438,6 +456,11 @@ void PDFusionRunner::prepare_io(PDGraphIO& g, const PrefillSlot& prefill, const 
       all_aliased = false;
     }
     if (!all_aliased) {
+      if (config_.kv_require_true_aliasing) {
+        MLLM_ERROR("PDKVCacheUpdate: KV cache input/output are not fully aliased but kv_require_true_aliasing=true. "
+                   "Refuse to run a bandwidth-heavy copy fallback.");
+        throw std::runtime_error("PDKVCacheUpdate: strict aliasing failed");
+      }
       MLLM_WARN("PDKVCacheUpdate: KV cache input/output are not fully aliased; kernel will preserve cache by copying in_* -> out_* "
                 "(correct but bandwidth-heavy). Consider enabling true in-place aliasing for performance.");
     }
@@ -446,8 +469,18 @@ void PDFusionRunner::prepare_io(PDGraphIO& g, const PrefillSlot& prefill, const 
 
   int32_t* input_ids_ptr = g.input_tensors[0].ptr<int32_t>();
   int32_t* pos_ids_ptr = g.input_tensors[1].ptr<int32_t>();
-  uint16_t* attn_mask_ptr = g.input_tensors[2].ptr<uint16_t>();
-  int32_t* ctrl_ptr = g.input_tensors[3].ptr<int32_t>();
+  const int idx_ctrl = config_.pd_attention_mask_input ? 3 : 2;
+  const int idx_ref_max_seq = idx_ctrl + 1;
+  const int idx_ref_max_past = idx_ctrl + 2;
+  uint16_t* attn_mask_ptr = config_.pd_attention_mask_input ? g.input_tensors[2].ptr<uint16_t>() : nullptr;
+  int32_t* ctrl_ptr = g.input_tensors[idx_ctrl].ptr<int32_t>();
+  int32_t* ref_max_seq_ptr = g.input_tensors[idx_ref_max_seq].ptr<int32_t>();
+  int32_t* ref_max_past_ptr = g.input_tensors[idx_ref_max_past].ptr<int32_t>();
+
+  // Default: disable reference caps to allow real long-context runs (e.g., 4k decode).
+  // For smoke tests on devices, you can set these to small positive numbers to avoid watchdog timeouts.
+  ref_max_seq_ptr[0] = -1;
+  ref_max_past_ptr[0] = -1;
 
   // ctrl layout:
   // - ctrl[0], ctrl[1] as enable flags
@@ -502,9 +535,11 @@ void PDFusionRunner::prepare_io(PDGraphIO& g, const PrefillSlot& prefill, const 
   // P1-1: avoid rewriting the entire [N * context_len] mask every step.
   // Only rows that are actually consumed this step need correct masking; unused rows can remain stale
   // because they never contribute to KV updates nor logits sampling after right-aligned packing.
-  if (!g.mask_initialized) {
-    std::fill_n(attn_mask_ptr, total_len * context_len, kMasked);
-    g.mask_initialized = true;
+  if (config_.pd_attention_mask_input) {
+    if (!g.mask_initialized) {
+      std::fill_n(attn_mask_ptr, total_len * context_len, kMasked);
+      g.mask_initialized = true;
+    }
   }
 
   auto clampPast = [&](int64_t n_past) -> int32_t {
@@ -515,27 +550,29 @@ void PDFusionRunner::prepare_io(PDGraphIO& g, const PrefillSlot& prefill, const 
   ctrl_ptr[4] = prefill.active ? clampPast(prefill.start_pos) : 0;
   ctrl_ptr[5] = decode.active ? clampPast(decode.start_pos) : 0;
 
-  // Prefill rows: only [base .. decode_idx-1] are active, causal within that interval,
-  // and must NOT see decode token (last column in current window).
-  if (prefill.active && m > 0) {
-    const int32_t n_past0 = clampPast(prefill.start_pos);
-    for (int32_t t = 0; t < m; ++t) {
-      const int32_t r = base + t;
-      if (r < 0 || r >= decode_idx) continue;
-      uint16_t* row = attn_mask_ptr + r * context_len;
-      std::fill_n(row, context_len, kMasked);
-      std::fill_n(row, n_past0, kAllowed);
-      for (int32_t j = base; j <= r; ++j) { row[past_len + j] = kAllowed; }
+  if (config_.pd_attention_mask_input) {
+    // Prefill rows: only [base .. decode_idx-1] are active, causal within that interval,
+    // and must NOT see decode token (last column in current window).
+    if (prefill.active && m > 0) {
+      const int32_t n_past0 = clampPast(prefill.start_pos);
+      for (int32_t t = 0; t < m; ++t) {
+        const int32_t r = base + t;
+        if (r < 0 || r >= decode_idx) continue;
+        uint16_t* row = attn_mask_ptr + r * context_len;
+        std::fill_n(row, context_len, kMasked);
+        std::fill_n(row, n_past0, kAllowed);
+        for (int32_t j = base; j <= r; ++j) { row[past_len + j] = kAllowed; }
+      }
     }
-  }
 
-  // Decode row: attends to its own past + itself only (must NOT see prefill current tokens).
-  if (decode.active) {
-    const int32_t n_past1 = clampPast(decode.start_pos);
-    uint16_t* row = attn_mask_ptr + decode_idx * context_len;
-    std::fill_n(row, context_len, kMasked);
-    std::fill_n(row, n_past1, kAllowed);
-    row[past_len + decode_idx] = kAllowed;
+    // Decode row: attends to its own past + itself only (must NOT see prefill current tokens).
+    if (decode.active) {
+      const int32_t n_past1 = clampPast(decode.start_pos);
+      uint16_t* row = attn_mask_ptr + decode_idx * context_len;
+      std::fill_n(row, context_len, kMasked);
+      std::fill_n(row, n_past1, kAllowed);
+      row[past_len + decode_idx] = kAllowed;
+    }
   }
 }
 
@@ -557,6 +594,11 @@ void PDFusionRunner::prepare_decode_io(const DecodeSlot& decode) {
       all_aliased = false;
     }
     if (!all_aliased) {
+      if (config_.kv_require_true_aliasing) {
+        MLLM_ERROR("PDKVCacheUpdate (decode-only): KV cache input/output are not fully aliased but kv_require_true_aliasing=true. "
+                   "Refuse to run a bandwidth-heavy copy fallback.");
+        throw std::runtime_error("PDKVCacheUpdate: strict aliasing failed (decode-only)");
+      }
       MLLM_WARN("PDKVCacheUpdate (decode-only): KV cache input/output are not fully aliased; kernel will preserve cache by copying in_* -> out_* "
                 "(correct but bandwidth-heavy).");
     }

@@ -23,14 +23,16 @@ static bool isFusedPDAttention(const mllm::ir::linalg::CustomizedOp::ptr_t& op) 
   auto* base = op->getAOp();
   auto* customized = dynamic_cast<mllm::plugin::interface::CustomizedOp*>(base);
   if (!customized) { return false; }
-  return customized->getCustomOpTypeName() == std::string("FusedPDAttention");
+  const auto t = customized->getCustomOpTypeName();
+  return t == std::string("FusedPDAttention") || t == std::string("FusedPDAttentionNoMask");
 }
 
 static bool isFusedPDAttentionK4(const mllm::ir::linalg::CustomizedOp::ptr_t& op) {
   auto* base = op->getAOp();
   auto* customized = dynamic_cast<mllm::plugin::interface::CustomizedOp*>(base);
   if (!customized) { return false; }
-  return customized->getCustomOpTypeName() == std::string("FusedPDAttentionK4");
+  const auto t = customized->getCustomOpTypeName();
+  return t == std::string("FusedPDAttentionK4") || t == std::string("FusedPDAttentionK4NoMask");
 }
 
 bool QnnAOTPDKVCacheUpdatePattern::isMatch(const mllm::ir::op_ptr_t& op) {
@@ -80,12 +82,17 @@ bool QnnAOTFusedPDAttentionPattern::rewrite(ir::IRWriter& /*writer*/, const ir::
   auto cust = op->cast_<mllm::ir::linalg::CustomizedOp>();
   MLLM_RETURN_FALSE_IF_NOT(isFusedPDAttention(cust));
 
+  auto* base = cust->getAOp();
+  auto* customized = dynamic_cast<mllm::plugin::interface::CustomizedOp*>(base);
+  MLLM_RETURN_FALSE_IF_NOT(customized);
+  const std::string type_name = customized->getCustomOpTypeName();
+
   MLLM_RETURN_FALSE_IF_NOT(op->getAttr("qnn_graph_name"));
   auto qnn_graph_name = op->getAttr("qnn_graph_name")->cast_<ir::StrAttr>()->data();
   MLLM_RETURN_FALSE_IF_NOT(op->getAttr("qnn_context_name"));
   auto qnn_context_name = op->getAttr("qnn_context_name")->cast_<ir::StrAttr>()->data();
 
-  auto qnn_op_node = QnnAOTNodeOperation::create("FusedPDAttention");
+  auto qnn_op_node = QnnAOTNodeOperation::create(type_name);
   qnn_op_node->setPackageName("LLaMAPackage")->setName(cust->getAOp()->getName());
 
   for (auto& in_v : op->inputs()) {
@@ -114,12 +121,17 @@ bool QnnAOTFusedPDAttentionK4Pattern::rewrite(ir::IRWriter& /*writer*/, const ir
   auto cust = op->cast_<mllm::ir::linalg::CustomizedOp>();
   MLLM_RETURN_FALSE_IF_NOT(isFusedPDAttentionK4(cust));
 
+  auto* base = cust->getAOp();
+  auto* customized = dynamic_cast<mllm::plugin::interface::CustomizedOp*>(base);
+  MLLM_RETURN_FALSE_IF_NOT(customized);
+  const std::string type_name = customized->getCustomOpTypeName();
+
   MLLM_RETURN_FALSE_IF_NOT(op->getAttr("qnn_graph_name"));
   auto qnn_graph_name = op->getAttr("qnn_graph_name")->cast_<ir::StrAttr>()->data();
   MLLM_RETURN_FALSE_IF_NOT(op->getAttr("qnn_context_name"));
   auto qnn_context_name = op->getAttr("qnn_context_name")->cast_<ir::StrAttr>()->data();
 
-  auto qnn_op_node = QnnAOTNodeOperation::create("FusedPDAttentionK4");
+  auto qnn_op_node = QnnAOTNodeOperation::create(type_name);
   qnn_op_node->setPackageName("LLaMAPackage")->setName(cust->getAOp()->getName());
 
   for (auto& in_v : op->inputs()) {
